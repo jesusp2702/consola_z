@@ -1,0 +1,2159 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Consola Z — Calculadora de Variable Compleja</title>
+
+<!-- React + ReactDOM -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<!-- Babel standalone, para transformar JSX en el navegador -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.4/babel.min.js"></script>
+<!-- mathjs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.11.0/math.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #0B0F0E; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState } = React;
+
+
+
+
+/* ============================== TOKENS ============================== */
+const C = {
+  bg: '#0B0F0E',
+  panel: '#121817',
+  panel2: '#161D1B',
+  border: '#1F2B27',
+  borderLit: '#2C3A35',
+  text: '#E6F2EC',
+  muted: '#6B8079',
+  phosphor: '#6EFFC0',
+  amber: '#FFB454',
+  sky: '#5CC8FF',
+  danger: '#FF6B6B',
+};
+const MONO = "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace";
+const SANS = "'Space Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif";
+
+/* ============================== COMPLEX HELPERS ============================== */
+function parseComplex(input) {
+  if (input === undefined || input === null) return math.complex(0, 0);
+  let raw = String(input).trim();
+  if (raw === '') return math.complex(0, 0);
+  let s = raw.replace(/\s+/g, '');
+  // notación polar libre en un solo campo: "5∠30", "5∠30°", "5<30"
+  const polarMatch = s.match(/^(-?[\d.]+)(?:∠|<)(-?[\d.]+)°?$/);
+  if (polarMatch) {
+    const mag = parseFloat(polarMatch[1]);
+    const angDeg = parseFloat(polarMatch[2]);
+    if (!isNaN(mag) && !isNaN(angDeg)) {
+      return math.complex({ r: mag, phi: (angDeg * Math.PI) / 180 });
+    }
+  }
+  s = s.replace(/[jJ]/g, 'i');
+  if (s === 'i' || s === '+i') s = '1i';
+  if (s === '-i') s = '-1i';
+  try {
+    return math.complex(s);
+  } catch (e) {
+    const n = parseFloat(s);
+    return isNaN(n) ? null : math.complex(n, 0);
+  }
+}
+function toRad(deg) { return (deg * Math.PI) / 180; }
+function toDeg(rad) { return (rad * 180) / Math.PI; }
+/* Interpreta un par de campos crudos (dos strings) según el modo de entrada activo (rectangular o polar). */
+function complexFromPair(mode, aStr, bStr) {
+  const a = aStr === '' || aStr === undefined ? 0 : parseFloat(aStr);
+  const b = bStr === '' || bStr === undefined ? 0 : parseFloat(bStr);
+  if (isNaN(a) || isNaN(b)) return null;
+  if (mode === 'polar') return math.complex({ r: a, phi: toRad(b) });
+  return math.complex(a, b);
+}
+/* Convierte un complejo ya calculado a un par de strings para el modo dado — así al alternar
+   rectangular/polar no se pierde el valor numérico que ya estaba cargado. */
+function pairFromComplex(mode, z) {
+  if (!z) return ['', ''];
+  if (mode === 'polar') return [String(round(math.abs(z), 6)), String(round(toDeg(math.arg(z)), 6))];
+  return [String(round(z.re, 6)), String(round(z.im, 6))];
+}
+function round(n, d = 4) {
+  if (Math.abs(n) < 1e-9) return 0;
+  const f = Math.pow(10, d);
+  return Math.round(n * f) / f;
+}
+function formatComplex(c, digits = 4) {
+  if (c === null || c === undefined) return '—';
+  const re = round(c.re, digits);
+  const im = round(c.im, digits);
+  if (im === 0) return `${re}`;
+  if (re === 0) return `${im < 0 ? '−' : ''}${Math.abs(im)}j`;
+  return `${re} ${im < 0 ? '−' : '+'} ${Math.abs(im)}j`;
+}
+function polarString(c) {
+  const r = round(math.abs(c), 4);
+  const th = round((math.arg(c) * 180) / Math.PI, 3);
+  return `${r} ∠ ${th}°`;
+}
+function computeBinary(a, b, op) {
+  if (op === '+') return math.add(a, b);
+  if (op === '−') return math.subtract(a, b);
+  if (op === '×') return math.multiply(a, b);
+  if (op === '÷') {
+    if (math.abs(b) === 0) throw new Error('División entre cero');
+    return math.divide(a, b);
+  }
+}
+
+/* ============================== CIRCUIT (SERIE/PARALELO) HELPERS ============================== */
+const CIRCUIT_COLORS = [C.amber, C.sky, '#C792EA', '#FFD166', '#FF6B6B', '#8BE9FD', '#B4F9C0', '#F7A278'];
+function seriesEq(list) {
+  return list.reduce((acc, z) => math.add(acc, z), math.complex(0, 0));
+}
+function parallelEq(list) {
+  if (list.some((z) => math.abs(z) === 0)) return math.complex(0, 0); // rama en 0Ω cortocircuita el conjunto
+  const sumInv = list.reduce((acc, z) => math.add(acc, math.divide(math.complex(1, 0), z)), math.complex(0, 0));
+  if (math.abs(sumInv) === 0) throw new Error('La suma de admitancias es 0 (circuito abierto, Zeq → ∞)');
+  return math.divide(math.complex(1, 0), sumInv);
+}
+
+/* ============================== TRAZA RLC (ESTILO LIBRO DE TEXTO) ==============================
+   Traza acumulativa donde cada "hoja" es un componente físico (R, L o C) cuya
+   impedancia se deriva de la frecuencia de trabajo en vez de escribirse directamente. */
+function computeComponentTrace(items, omega) {
+  const rows = [];
+  let accValue = null;
+  let accExpr = '';
+  let accTopOp = null;
+  items.forEach((it, idx) => {
+    const zVal = componentImpedance(it.kind, it.value, omega);
+    if (zVal === null) throw new Error(`Valor inválido en ${it.kind}${idx + 1}`);
+    const zLabel = `${it.kind}${idx + 1}`;
+    if (idx === 0) {
+      accValue = zVal;
+      accExpr = zLabel;
+      accTopOp = null;
+      rows.push({ id: it.id, label: zLabel, mode: null, expr: accExpr, value: accValue, z: zVal, kind: it.kind, rawValue: it.value });
+      return;
+    }
+    const mode = it.combine === 'paralelo' ? 'paralelo' : 'serie';
+    const needsParens = accTopOp !== null && accTopOp !== mode;
+    const leftStr = needsParens ? `(${accExpr})` : accExpr;
+    const opSym = mode === 'serie' ? ' + ' : ' ∥ ';
+    accExpr = `${leftStr}${opSym}${zLabel}`;
+    accValue = mode === 'serie' ? math.add(accValue, zVal) : parallelEq([accValue, zVal]);
+    accTopOp = mode;
+    rows.push({ id: it.id, label: zLabel, mode, expr: accExpr, value: accValue, z: zVal, kind: it.kind, rawValue: it.value });
+  });
+  return rows;
+}
+
+/* ============================== MATRIX HELPERS ============================== */
+function makeGrid(rows, cols, fill = '') {
+  return Array.from({ length: rows }, () => Array.from({ length: cols }, () => fill));
+}
+function resizeGrid(grid, rows, cols) {
+  const ng = makeGrid(rows, cols, '');
+  for (let i = 0; i < Math.min(rows, grid.length); i++) {
+    for (let j = 0; j < Math.min(cols, grid[0] ? grid[0].length : 0); j++) {
+      ng[i][j] = grid[i][j];
+    }
+  }
+  return ng;
+}
+function gridToComplex(grid) {
+  /* Cada celda acepta ahora una EXPRESIÓN compleja completa, no solo un literal:
+     "13-5j+10", "(3+4j)*2", "5∠30 + 2∠-45", "10∥(5+5j)". Así, un elemento de Zbus
+     que es suma de impedancias de rama se escribe directo, sin sumar en papel.
+     Se evalúa con el mismo parser del módulo de circuitos (sin variables Zn). */
+  return grid.map((row, i) =>
+    row.map((cell, j) => {
+      const raw = String(cell).trim();
+      if (raw === '') return math.complex(0, 0);
+      try {
+        return evalZExpr(raw, {});
+      } catch (e) {
+        throw new Error(`Celda (${i + 1},${j + 1}): ${e.message}`);
+      }
+    })
+  );
+}
+function ctranspose(A) {
+  return math.transpose(A).map((row) => row.map((c) => math.conj(c)));
+}
+function conjMatrix(A) {
+  return A.map((row) => row.map((c) => math.conj(c)));
+}
+
+/* ============================== ARGAND DIAGRAM ============================== */
+/* Geometría de punta de flecha reutilizable (Argand y el diagrama fasorial punta-cola comparten esto). */
+function arrowHeadPts(x1, y1, x2, y2, headLen = 9, headWidth = 6.5) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const bx = x2 - ux * headLen, by = y2 - uy * headLen;
+  const px = -uy, py = ux;
+  return {
+    base: { x: bx, y: by },
+    tip: { x: x2, y: y2 },
+    p2: { x: bx + (px * headWidth) / 2, y: by + (py * headWidth) / 2 },
+    p3: { x: bx - (px * headWidth) / 2, y: by - (py * headWidth) / 2 },
+  };
+}
+
+function Argand({ points, size = 260 }) {
+  const mags = points.map((p) => math.abs(p.value)).filter((m) => isFinite(m));
+  const maxMag = Math.max(1, ...mags);
+  const scale = (size / 2 - 28) / maxMag;
+  const cx = size / 2, cy = size / 2;
+  const toXY = (c) => ({ x: cx + c.re * scale, y: cy - c.im * scale });
+  const rings = [0.25, 0.5, 0.75, 1];
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" height={size} style={{ display: 'block' }}>
+      <rect x="0" y="0" width={size} height={size} fill={C.bg} />
+      {rings.map((f, i) => (
+        <circle key={i} cx={cx} cy={cy} r={f * maxMag * scale} fill="none" stroke={C.border} strokeWidth="1" />
+      ))}
+      <line x1="0" y1={cy} x2={size} y2={cy} stroke={C.border} strokeWidth="1" />
+      <line x1={cx} y1="0" x2={cx} y2={size} stroke={C.border} strokeWidth="1" />
+      <text x={size - 18} y={cy - 6} fill={C.muted} fontSize="10" fontFamily={MONO}>Re</text>
+      <text x={cx + 6} y="12" fill={C.muted} fontSize="10" fontFamily={MONO}>Im</text>
+      {points.map((p, i) => {
+        if (!isFinite(p.value.re) || !isFinite(p.value.im)) return null;
+        const { x, y } = toXY(p.value);
+        const isOrigin = Math.abs(x - cx) < 0.6 && Math.abs(y - cy) < 0.6;
+        if (isOrigin) {
+          return (
+            <g key={i}>
+              <circle cx={x} cy={y} r="4" fill={p.color} />
+              <text x={x + 7} y={y - 7} fill={p.color} fontSize="11" fontFamily={MONO}>{p.label}</text>
+            </g>
+          );
+        }
+        const head = arrowHeadPts(cx, cy, x, y);
+        return (
+          <g key={i}>
+            <line x1={cx} y1={cy} x2={head.base.x} y2={head.base.y} stroke={p.color} strokeWidth="1.6" opacity="0.75" />
+            <polygon
+              points={`${head.tip.x},${head.tip.y} ${head.p2.x},${head.p2.y} ${head.p3.x},${head.p3.y}`}
+              fill={p.color}
+              style={{ filter: `drop-shadow(0 0 3px ${p.color})` }}
+            />
+            <text x={x + 7} y={y - 7} fill={p.color} fontSize="11" fontFamily={MONO}>{p.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ============================== DIAGRAMA FASORIAL: SUMA PUNTA-COLA ==============================
+   Construcción gráfica clásica de la suma de fasores: cada vector se dibuja a continuación
+   del anterior (punta-cola) y el fasor resultante se traza del origen absoluto hasta el
+   punto final, en línea punteada — la forma en que se enseña la suma vectorial en un libro
+   de circuitos, complementando el Argand estándar (vectores desde el origen). */
+function PhasorChain({ points, size = 280 }) {
+  const cumulative = [math.complex(0, 0)];
+  points.forEach((p) => {
+    const prev = cumulative[cumulative.length - 1];
+    cumulative.push(isFinite(p.value.re) && isFinite(p.value.im) ? math.add(prev, p.value) : prev);
+  });
+  const xs = cumulative.map((c) => c.re).filter(isFinite);
+  const ys = cumulative.map((c) => c.im).filter(isFinite);
+  const minX = Math.min(0, ...xs), maxX = Math.max(0, ...xs);
+  const minY = Math.min(0, ...ys), maxY = Math.max(0, ...ys);
+  const spanX = Math.max(maxX - minX, 1e-6);
+  const spanY = Math.max(maxY - minY, 1e-6);
+  const pad = 34;
+  const scale = Math.min((size - pad * 2) / spanX, (size - pad * 2) / spanY);
+  const midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
+  const cx = size / 2, cy = size / 2;
+  const toXY = (c) => ({ x: cx + (c.re - midX) * scale, y: cy - (c.im - midY) * scale });
+
+  const origin = toXY(math.complex(0, 0));
+  const resultant = cumulative[cumulative.length - 1];
+  const resXY = toXY(resultant);
+  const resHead = arrowHeadPts(origin.x, origin.y, resXY.x, resXY.y);
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" height={size} style={{ display: 'block' }}>
+      <rect x="0" y="0" width={size} height={size} fill={C.bg} />
+      <line x1="0" y1={origin.y} x2={size} y2={origin.y} stroke={C.border} strokeWidth="1" />
+      <line x1={origin.x} y1="0" x2={origin.x} y2={size} stroke={C.border} strokeWidth="1" />
+
+      {points.map((p, i) => {
+        const a = toXY(cumulative[i]);
+        const b = toXY(cumulative[i + 1]);
+        if (!isFinite(a.x) || !isFinite(b.x)) return null;
+        const head = arrowHeadPts(a.x, a.y, b.x, b.y);
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        return (
+          <g key={i}>
+            <line x1={a.x} y1={a.y} x2={head.base.x} y2={head.base.y} stroke={p.color} strokeWidth="2" opacity="0.85" />
+            <polygon points={`${head.tip.x},${head.tip.y} ${head.p2.x},${head.p2.y} ${head.p3.x},${head.p3.y}`} fill={p.color} />
+            <text x={mx + 6} y={my - 6} fill={p.color} fontSize="11" fontFamily={MONO}>{p.label}</text>
+          </g>
+        );
+      })}
+
+      {isFinite(resXY.x) && isFinite(resXY.y) && (
+        <g>
+          <line x1={origin.x} y1={origin.y} x2={resHead.base.x} y2={resHead.base.y}
+            stroke={C.phosphor} strokeWidth="2" strokeDasharray="6,4" opacity="0.95" />
+          <polygon
+            points={`${resHead.tip.x},${resHead.tip.y} ${resHead.p2.x},${resHead.p2.y} ${resHead.p3.x},${resHead.p3.y}`}
+            fill={C.phosphor} style={{ filter: `drop-shadow(0 0 4px ${C.phosphor})` }}
+          />
+        </g>
+      )}
+      <circle cx={origin.x} cy={origin.y} r="3" fill={C.muted} />
+    </svg>
+  );
+}
+
+/* ============================== ZOOM PLOT: LIENZO FASORIAL INTERACTIVO ==============================
+   Lienzo SVG con zoom y paneo para diagramas fasoriales. El problema que resuelve: en casos
+   reales (regulación de un transformador, caída en una línea) el ángulo entre V₁ y V₂ es de
+   décimas de grado y las flechas se dibujan una encima de la otra. Aquí el usuario puede:
+     · rueda del ratón / pellizco táctil → zoom centrado en el cursor
+     · arrastrar → paneo
+     · AJUSTAR → encuadre de todo el diagrama
+     · PUNTA → auto-zoom a la nube de puntas de los fasores (el triángulo de caída de tensión)
+   Todo se dibuja en coordenadas de mundo (voltios/amperios) y se transforma a píxeles en JS,
+   de modo que grosores de línea, puntas de flecha y etiquetas mantienen tamaño constante a
+   cualquier nivel de zoom. */
+function niceStep(raw) {
+  if (!isFinite(raw) || raw <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const m = raw / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+
+function ZoomPlot({ segments, arcs = [], tipPoints = null, height = 320, unit = '', note = '' }) {
+  const wrapRef = React.useRef(null);
+  const svgRef = React.useRef(null);
+  const [w, setW] = React.useState(360);
+  React.useEffect(() => {
+    if (!wrapRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const cw = entries[0].contentRect.width;
+      if (cw > 0) setW(Math.max(220, cw));
+    });
+    ro.observe(wrapRef.current);
+    return () => ro.disconnect();
+  }, []);
+  const H = height;
+
+  const finiteSegs = segments.filter((s) => [s.x1, s.y1, s.x2, s.y2].every(isFinite));
+  const allPts = [[0, 0], ...finiteSegs.flatMap((s) => [[s.x1, s.y1], [s.x2, s.y2]])];
+
+  const fitView = React.useCallback((pts, padPx = 48) => {
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const spanX = Math.max(maxX - minX, 1e-12), spanY = Math.max(maxY - minY, 1e-12);
+    let ppu = Math.min((w - 2 * padPx) / spanX, (H - 2 * padPx) / spanY);
+    if (!isFinite(ppu) || ppu <= 0) ppu = 1;
+    return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, ppu };
+  }, [w, H]);
+
+  const [view, setView] = React.useState(null); // null → auto-encuadre de todo
+  const v = view || fitView(allPts);
+  const toS = (x, y) => ({ x: w / 2 + (x - v.cx) * v.ppu, y: H / 2 - (y - v.cy) * v.ppu });
+  const toW = (sx, sy) => ({ x: v.cx + (sx - w / 2) / v.ppu, y: v.cy - (sy - H / 2) / v.ppu });
+
+  const zoomAt = (sx, sy, factor) => {
+    const anchor = toW(sx, sy);
+    setView((prev) => {
+      const cur = prev || fitView(allPts);
+      const ppu = Math.min(Math.max(cur.ppu * factor, 1e-9), 1e12);
+      // mantiene el punto bajo el cursor fijo en pantalla
+      return {
+        ppu,
+        cx: anchor.x - (sx - w / 2) / ppu,
+        cy: anchor.y + (sy - H / 2) / ppu,
+      };
+    });
+  };
+
+  // rueda del ratón — listener nativo no-pasivo para poder hacer preventDefault
+  React.useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.18 : 1 / 1.18);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  });
+
+  // paneo con arrastre + pellizco con dos dedos (pointer events)
+  const pointers = React.useRef(new Map());
+  const gesture = React.useRef(null);
+  const onPointerDown = (e) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const r = e.currentTarget.getBoundingClientRect();
+    pointers.current.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
+    const ps = [...pointers.current.values()];
+    gesture.current = ps.length === 2
+      ? { type: 'pinch', d0: Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y), v0: { ...v } }
+      : { type: 'pan', start: ps[0], v0: { ...v } };
+  };
+  const onPointerMove = (e) => {
+    if (!gesture.current || !pointers.current.has(e.pointerId)) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    pointers.current.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
+    const ps = [...pointers.current.values()];
+    const g = gesture.current;
+    if (g.type === 'pan' && ps.length === 1) {
+      const dx = ps[0].x - g.start.x, dy = ps[0].y - g.start.y;
+      setView({ ppu: g.v0.ppu, cx: g.v0.cx - dx / g.v0.ppu, cy: g.v0.cy + dy / g.v0.ppu });
+    } else if (g.type === 'pinch' && ps.length === 2) {
+      const d = Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y);
+      const f = d / (g.d0 || 1);
+      const mx = (ps[0].x + ps[1].x) / 2, my = (ps[0].y + ps[1].y) / 2;
+      const ppu = Math.min(Math.max(g.v0.ppu * f, 1e-9), 1e12);
+      const ax = g.v0.cx + (mx - w / 2) / g.v0.ppu;
+      const ay = g.v0.cy - (my - H / 2) / g.v0.ppu;
+      setView({ ppu, cx: ax - (mx - w / 2) / ppu, cy: ay + (my - H / 2) / ppu });
+    }
+  };
+  const onPointerUp = (e) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size === 0) gesture.current = null;
+  };
+
+  // cuadrícula adaptativa con paso "bonito" (1-2-5 × 10ⁿ)
+  const step = niceStep(90 / v.ppu);
+  const wMin = toW(0, H), wMax = toW(w, 0);
+  const gridV = [], gridH = [];
+  for (let x = Math.ceil(wMin.x / step) * step; x <= wMax.x; x += step) gridV.push(x);
+  for (let y = Math.ceil(wMin.y / step) * step; y <= wMax.y; y += step) gridH.push(y);
+  const org = toS(0, 0);
+
+  // barra de escala (esquina inferior izquierda)
+  const barUnits = step;
+  const barPx = barUnits * v.ppu;
+  const fmtN = (n) => {
+    const a = Math.abs(n);
+    if (a >= 1000) return `${round(n / 1000, 2)}k`;
+    if (a < 0.01 && a > 0) return n.toExponential(1);
+    return `${round(n, 3)}`;
+  };
+
+  const zoomRelFit = v.ppu / fitView(allPts).ppu;
+
+  const ZBtn = ({ children, onClick, title }) => (
+    <button onClick={onClick} title={title} style={{
+      fontFamily: MONO, fontSize: 11, letterSpacing: '0.06em', padding: '4px 9px',
+      background: 'transparent', border: `1px solid ${C.borderLit}`, borderRadius: 3,
+      color: C.text, cursor: 'pointer',
+    }}>{children}</button>
+  );
+
+  return (
+    <div ref={wrapRef}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+        <ZBtn onClick={() => setView(null)} title="encuadrar todo el diagrama">AJUSTAR</ZBtn>
+        {tipPoints && tipPoints.length >= 1 && (
+          <ZBtn
+            onClick={() => setView(fitView(tipPoints, 60))}
+            title="auto-zoom a la zona de las puntas (triángulo de caída)"
+          >◎ PUNTA</ZBtn>
+        )}
+        <ZBtn onClick={() => zoomAt(w / 2, H / 2, 1.6)} title="acercar">+</ZBtn>
+        <ZBtn onClick={() => zoomAt(w / 2, H / 2, 1 / 1.6)} title="alejar">−</ZBtn>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: C.muted, marginLeft: 'auto' }}>
+          zoom ×{zoomRelFit >= 100 ? Math.round(zoomRelFit) : round(zoomRelFit, 2)}
+        </span>
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${w} ${H}`} width="100%" height={H}
+        style={{ display: 'block', touchAction: 'none', cursor: 'grab', borderRadius: 4 }}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+      >
+        <rect x="0" y="0" width={w} height={H} fill={C.bg} />
+        {gridV.map((x, i) => {
+          const s = toS(x, 0);
+          return <line key={`gv${i}`} x1={s.x} y1="0" x2={s.x} y2={H} stroke={C.border} strokeWidth="0.6" opacity="0.55" />;
+        })}
+        {gridH.map((y, i) => {
+          const s = toS(0, y);
+          return <line key={`gh${i}`} x1="0" y1={s.y} x2={w} y2={s.y} stroke={C.border} strokeWidth="0.6" opacity="0.55" />;
+        })}
+        {org.y >= 0 && org.y <= H && <line x1="0" y1={org.y} x2={w} y2={org.y} stroke={C.borderLit} strokeWidth="1" />}
+        {org.x >= 0 && org.x <= w && <line x1={org.x} y1="0" x2={org.x} y2={H} stroke={C.borderLit} strokeWidth="1" />}
+        {org.x >= -6 && org.x <= w + 6 && org.y >= -6 && org.y <= H + 6 && (
+          <circle cx={org.x} cy={org.y} r="3" fill={C.muted} />
+        )}
+
+        {arcs.map((a, i) => {
+          const c = toS(a.cx, a.cy);
+          const sa = -a.a1, ea = -a.a2; // pantalla: eje y invertido
+          const p1 = { x: c.x + a.rPx * Math.cos(sa), y: c.y + a.rPx * Math.sin(sa) };
+          const p2 = { x: c.x + a.rPx * Math.cos(ea), y: c.y + a.rPx * Math.sin(ea) };
+          const delta = a.a2 - a.a1;
+          const sweep = delta >= 0 ? 0 : 1;
+          const large = Math.abs(delta) > Math.PI ? 1 : 0;
+          const mid = -(a.a1 + delta / 2);
+          const lp = { x: c.x + (a.rPx + 14) * Math.cos(mid), y: c.y + (a.rPx + 14) * Math.sin(mid) };
+          if (Math.abs(delta) < 1e-7) return null;
+          return (
+            <g key={`arc${i}`}>
+              <path d={`M ${p1.x} ${p1.y} A ${a.rPx} ${a.rPx} 0 ${large} ${sweep} ${p2.x} ${p2.y}`}
+                fill="none" stroke={a.color} strokeWidth="1.3" opacity="0.9" />
+              <text x={lp.x} y={lp.y} fill={a.color} fontSize="11" fontFamily={MONO} textAnchor="middle">{a.label}</text>
+            </g>
+          );
+        })}
+
+        {finiteSegs.map((s, i) => {
+          const a = toS(s.x1, s.y1), b = toS(s.x2, s.y2);
+          const lenPx = Math.hypot(b.x - a.x, b.y - a.y);
+          if (lenPx < 0.8) {
+            return <circle key={i} cx={b.x} cy={b.y} r="3.5" fill={s.color} />;
+          }
+          const head = arrowHeadPts(a.x, a.y, b.x, b.y, Math.min(9, lenPx * 0.4), 6.5);
+          const lx = s.labelAt === 'mid' ? (a.x + b.x) / 2 : b.x;
+          const ly = s.labelAt === 'mid' ? (a.y + b.y) / 2 : b.y;
+          return (
+            <g key={i}>
+              <line x1={a.x} y1={a.y} x2={head.base.x} y2={head.base.y}
+                stroke={s.color} strokeWidth={s.width || 2} opacity={s.opacity ?? 0.9}
+                strokeDasharray={s.dash || 'none'} />
+              <polygon
+                points={`${head.tip.x},${head.tip.y} ${head.p2.x},${head.p2.y} ${head.p3.x},${head.p3.y}`}
+                fill={s.color}
+                style={s.glow ? { filter: `drop-shadow(0 0 4px ${s.color})` } : undefined}
+              />
+              {s.label && <text x={lx + 7} y={ly - 7} fill={s.color} fontSize="11" fontFamily={MONO}>{s.label}</text>}
+            </g>
+          );
+        })}
+
+        <g>
+          <line x1="14" y1={H - 16} x2={14 + barPx} y2={H - 16} stroke={C.muted} strokeWidth="2" />
+          <line x1="14" y1={H - 20} x2="14" y2={H - 12} stroke={C.muted} strokeWidth="1.4" />
+          <line x1={14 + barPx} y1={H - 20} x2={14 + barPx} y2={H - 12} stroke={C.muted} strokeWidth="1.4" />
+          <text x={14 + barPx / 2} y={H - 23} fill={C.muted} fontSize="10" fontFamily={MONO} textAnchor="middle">
+            {fmtN(barUnits)} {unit}
+          </text>
+        </g>
+      </svg>
+      <div style={{ fontFamily: MONO, fontSize: 10, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>
+        rueda / pellizco = zoom · arrastrar = paneo{note ? ` · ${note}` : ''}
+      </div>
+    </div>
+  );
+}
+
+/* Constructores de segmentos para los dos estilos clásicos de diagrama */
+function originSegments(points) {
+  return points.map((p) => ({
+    x1: 0, y1: 0, x2: p.value.re, y2: p.value.im,
+    color: p.color, label: p.label, labelAt: 'tip',
+    dash: p.dash || null, glow: !!p.glow, width: p.width || 1.8,
+  }));
+}
+function chainSegments(points) {
+  const segs = [];
+  let acc = math.complex(0, 0);
+  points.forEach((p) => {
+    const ok = isFinite(p.value.re) && isFinite(p.value.im);
+    const next = ok ? math.add(acc, p.value) : acc;
+    segs.push({ x1: acc.re, y1: acc.im, x2: next.re, y2: next.im, color: p.color, label: p.label, labelAt: 'mid', width: 2 });
+    acc = next;
+  });
+  return { segs, resultant: acc };
+}
+
+/* ============================== MÓDULO: REGULACIÓN / MÁQUINA ==============================
+   Construcción fasorial de V₁ = V₂ + I·(R + jX) — el diagrama de regulación de un
+   transformador o línea corta, o de una máquina síncrona (E = V + I·(Ra + jXs)).
+   La corriente se dibuja en escala independiente (voltios y amperios no comparten escala),
+   se trazan los arcos de φ (factor de potencia) y δ (ángulo entre V₁ y V₂), y el botón
+   "PUNTA" del lienzo enfoca el triángulo de caída I·R / I·jX que a escala completa es
+   invisible cuando δ es de décimas de grado. */
+function RegulationModule() {
+  const [machine, setMachine] = useState('trafo'); // 'trafo' | 'sync'
+  const [v2m, setV2m] = useState('2400'); const [v2a, setV2a] = useState('0');
+  const [im, setIm] = useState('20.8'); const [ia, setIa] = useState('-36.87');
+  const [rStr, setRStr] = useState('1.4276'); const [xStr, setXStr] = useState('1.8161');
+
+  const isSync = machine === 'sync';
+  const nameRef = isSync ? 'V' : 'V₂';    // fasor de referencia
+  const nameRes = isSync ? 'E' : 'V₁';    // fasor resultante
+  const nameR = isSync ? 'I·Ra' : 'I·R';
+  const nameX = isSync ? 'I·jXs' : 'I·jX';
+
+  const nums = [v2m, v2a, im, ia, rStr, xStr].map((s) => parseFloat(s === '' ? 'NaN' : s));
+  const bad = nums.some((n) => isNaN(n));
+  const [V2M, V2A, IM, IA, R, X] = nums;
+
+  let V2 = math.complex(0, 0), I = math.complex(0, 0), VR = math.complex(0, 0), VX = math.complex(0, 0), V1 = math.complex(0, 0);
+  let reg = 0, phi = 0, delta = 0, fp = 1;
+  if (!bad) {
+    V2 = math.complex({ r: V2M, phi: toRad(V2A) });
+    I = math.complex({ r: IM, phi: toRad(IA) });
+    VR = math.multiply(I, R);
+    VX = math.multiply(I, math.complex(0, X));
+    V1 = math.add(V2, math.add(VR, VX));
+    reg = math.abs(V2) > 0 ? ((math.abs(V1) - math.abs(V2)) / math.abs(V2)) * 100 : 0;
+    phi = toDeg(math.arg(V2) - math.arg(I)); // >0 → corriente en atraso
+    delta = toDeg(math.arg(V1) - math.arg(V2));
+    fp = Math.cos(toRad(phi));
+  }
+  const lagging = phi > 0.001, leading = phi < -0.001;
+
+  // segmentos: cadena V₂ → I·R → I·jX, resultante punteado, corriente en escala independiente
+  const chainPts = [
+    { label: nameRef, value: V2, color: C.amber },
+    { label: nameR, value: VR, color: C.sky },
+    { label: nameX, value: VX, color: '#C792EA' },
+  ];
+  const { segs } = chainSegments(chainPts);
+  const kI = math.abs(I) > 0 ? (0.35 * Math.max(math.abs(V2), 1e-9)) / math.abs(I) : 1;
+  const Iscaled = math.multiply(I, kI);
+  const allSegs = bad ? [] : [
+    ...segs,
+    { x1: 0, y1: 0, x2: V1.re, y2: V1.im, color: C.phosphor, label: nameRes, labelAt: 'tip', dash: '6,4', glow: true, width: 2 },
+    { x1: 0, y1: 0, x2: Iscaled.re, y2: Iscaled.im, color: C.danger, label: 'I (esc. indep.)', labelAt: 'tip', dash: '2,4', width: 1.6 },
+  ];
+  const tipPts = bad ? null : [
+    [V2.re, V2.im],
+    [V2.re + VR.re, V2.im + VR.im],
+    [V1.re, V1.im],
+  ];
+  const arcs = bad ? [] : [
+    { cx: 0, cy: 0, a1: math.arg(I), a2: math.arg(V2), rPx: 44, color: C.danger, label: `φ=${round(phi, 2)}°` },
+    { cx: 0, cy: 0, a1: math.arg(V2), a2: math.arg(V1), rPx: 78, color: C.phosphor, label: `δ=${round(delta, 3)}°` },
+  ];
+
+  const Field = ({ label, val, set, w = 92, suffix = '' }) => (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontFamily: MONO, fontSize: 10, color: C.muted, letterSpacing: '0.08em' }}>{label}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <input value={val} onChange={(e) => set(e.target.value)} placeholder="0" style={{
+          width: w, fontFamily: MONO, fontSize: 13, color: C.text, background: C.bg,
+          border: `1px solid ${C.borderLit}`, borderRadius: 3, padding: '7px 8px', outline: 'none',
+        }} />
+        {suffix && <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>{suffix}</span>}
+      </div>
+    </label>
+  );
+
+  const interp = bad ? '' : isSync
+    ? (lagging
+        ? `Corriente en ATRASO (φ > 0): la máquina entrega reactivos → generador SOBREEXCITADO (|E| = ${round(math.abs(V1), 2)} > |V| = ${round(math.abs(V2), 2)}).`
+        : leading
+          ? `Corriente en ADELANTO (φ < 0): la máquina absorbe reactivos → generador SUBEXCITADO.`
+          : `FP unitario: la caída I·Xs es casi perpendicular a V; |E| apenas supera |V| y δ domina la geometría.`)
+    : (lagging
+        ? `Carga inductiva (FP en atraso): I·jX se proyecta a favor de ${nameRef} → regulación positiva (${round(reg, 3)} %).`
+        : leading
+          ? `Carga capacitiva (FP en adelanto): la caída reactiva puede REDUCIR |${nameRes}| → regulación baja o negativa (efecto Ferranti en líneas).`
+          : `FP unitario: solo I·R se proyecta sobre ${nameRef}; regulación mínima para esta corriente.`);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Panel>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+          <Btn active={!isSync} accent={C.amber} onClick={() => setMachine('trafo')}>TRANSFORMADOR / LÍNEA (V₁ = V₂ + I·Z)</Btn>
+          <Btn active={isSync} accent={C.sky} onClick={() => setMachine('sync')}>MÁQUINA SÍNCRONA (E = V + I·(Ra+jXs))</Btn>
+        </div>
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <Field label={`|${nameRef}|`} val={v2m} set={setV2m} suffix="V" />
+          <Field label={`∠${nameRef}`} val={v2a} set={setV2a} suffix="°" w={70} />
+          <Field label="|I|" val={im} set={setIm} suffix="A" />
+          <Field label="∠I" val={ia} set={setIa} suffix="°" w={70} />
+          <Field label={isSync ? 'Ra' : 'R'} val={rStr} set={setRStr} suffix="Ω" w={84} />
+          <Field label={isSync ? 'Xs' : 'X'} val={xStr} set={setXStr} suffix="Ω" w={84} />
+        </div>
+        <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 10 }}>
+          convención: ∠I negativo = corriente en atraso respecto a la referencia (carga inductiva)
+        </div>
+      </Panel>
+
+      {bad ? (
+        <Panel><ErrorBox message="Complete todos los campos con valores numéricos." /></Panel>
+      ) : (
+        <>
+          <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: 16 }}>
+            <Panel>
+              <Label>Resultados</Label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px' }}>
+                  <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{nameRes} = {nameRef} + {nameR} + {nameX}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 20, color: C.phosphor, marginTop: 4 }}>{polarString(V1)} V</div>
+                  <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 2 }}>{formatComplex(V1)} V</div>
+                </div>
+                <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px', fontFamily: MONO, fontSize: 13, color: C.text, lineHeight: 1.9 }}>
+                  <div>{nameR} = {polarString(VR)} V</div>
+                  <div>{nameX} = {polarString(VX)} V</div>
+                  <div style={{ color: C.danger }}>φ = {round(phi, 3)}° · FP = {round(Math.abs(fp), 4)} {lagging ? '(atraso)' : leading ? '(adelanto)' : '(unitario)'}</div>
+                  <div style={{ color: C.phosphor }}>δ = {round(delta, 4)}°</div>
+                  {!isSync && (
+                    <div style={{ color: C.amber }}>Regulación = (|V₁|−|V₂|)/|V₂| = {round(reg, 3)} %</div>
+                  )}
+                </div>
+                <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.sky, lineHeight: 1.7, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, padding: '10px 14px' }}>
+                  {interp}
+                </div>
+              </div>
+            </Panel>
+            <Panel>
+              <Label>Diagrama fasorial — use ◎ PUNTA para ver el triángulo de caída</Label>
+              <ZoomPlot
+                segments={allSegs}
+                arcs={arcs}
+                tipPoints={tipPts}
+                unit="V"
+                height={360}
+                note="I se dibuja en escala independiente (A ≠ V), solo su dirección es comparable"
+              />
+            </Panel>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+/* ============================== SMALL UI PRIMITIVES ============================== */
+function Panel({ children, style }) {
+  return (
+    <div
+      className="qz-panel"
+      style={{
+        background: C.panel,
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: 16,
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+function Label({ children }) {
+  return (
+    <div style={{ fontFamily: SANS, fontSize: 11, letterSpacing: '0.08em', color: C.muted, textTransform: 'uppercase', marginBottom: 6 }}>
+      {children}
+    </div>
+  );
+}
+function TextField({ value, onChange, placeholder, color, width = 96 }) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        width,
+        background: C.bg,
+        border: `1px solid ${C.border}`,
+        borderRadius: 4,
+        color: color || C.text,
+        fontFamily: MONO,
+        fontSize: 14,
+        padding: '6px 8px',
+        outline: 'none',
+      }}
+      onFocus={(e) => (e.target.style.borderColor = C.phosphor)}
+      onBlur={(e) => (e.target.style.borderColor = C.border)}
+    />
+  );
+}
+function Btn({ children, onClick, active, accent }) {
+  const bg = active ? (accent || C.phosphor) : 'transparent';
+  const fg = active ? C.bg : (accent || C.text);
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        fontFamily: MONO,
+        fontSize: 13,
+        padding: '8px 14px',
+        borderRadius: 4,
+        border: `1px solid ${active ? (accent || C.phosphor) : C.border}`,
+        background: bg,
+        color: fg,
+        cursor: 'pointer',
+        transition: 'all 120ms ease',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+function ErrorBox({ message }) {
+  if (!message) return null;
+  return (
+    <div style={{ color: C.danger, fontFamily: MONO, fontSize: 13, marginTop: 10, border: `1px solid ${C.danger}`, borderRadius: 4, padding: '8px 10px' }}>
+      ⚠ {message}
+    </div>
+  );
+}
+function ModeToggle({ mode, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <Btn active={mode === 'rect'} onClick={() => onChange('rect')}>RECTANGULAR (R + jX)</Btn>
+      <Btn active={mode === 'polar'} onClick={() => onChange('polar')}>POLAR (r ∠ θ)</Btn>
+    </div>
+  );
+}
+function ComplexPairField({ mode, aVal, bVal, onA, onB, color, width = 78, unitSuffix = '' }) {
+  return (
+    <div className="qz-field-pair" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <TextField value={aVal} onChange={onA} placeholder={mode === 'polar' ? 'r' : 'R'} color={color} width={width} />
+      <span style={{ color: C.muted, fontFamily: MONO }}>{mode === 'polar' ? '∠' : '+'}</span>
+      <TextField value={bVal} onChange={onB} placeholder={mode === 'polar' ? 'θ' : 'X'} color={color} width={width} />
+      <span style={{ color: C.muted, fontFamily: MONO }}>{mode === 'polar' ? '°' : 'j'}{unitSuffix}</span>
+    </div>
+  );
+}
+
+/* ============================== COMPLEX NUMBER MODULE ============================== */
+function ComplexModule() {
+  const [inputMode, setInputMode] = useState('rect'); // rect | polar
+
+  /* --- binary ops state --- */
+  const [aRe, setARe] = useState('3'); const [aIm, setAIm] = useState('4');
+  const [bRe, setBRe] = useState('1'); const [bIm, setBIm] = useState('-2');
+  const [op, setOp] = useState('+');
+
+  const A = complexFromPair(inputMode, aRe, aIm) || math.complex(0, 0);
+  const B = complexFromPair(inputMode, bRe, bIm) || math.complex(0, 0);
+
+  let result = null, resultErr = '';
+  try { result = computeBinary(A, B, op); } catch (e) { resultErr = e.message; }
+
+  /* Alterna rectangular/polar preservando el valor numérico ya cargado en A y B. */
+  const changeInputMode = (newMode) => {
+    if (newMode === inputMode) return;
+    const [nARe, nAIm] = pairFromComplex(newMode, A);
+    const [nBRe, nBIm] = pairFromComplex(newMode, B);
+    setARe(nARe); setAIm(nAIm);
+    setBRe(nBRe); setBIm(nBIm);
+    setInputMode(newMode);
+  };
+
+  const argandPointsOps = [
+    { label: 'A', value: A, color: C.amber },
+    { label: 'B', value: B, color: C.sky },
+    ...(result ? [{ label: 'R', value: result, color: C.phosphor }] : []),
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+        <ModeToggle mode={inputMode} onChange={changeInputMode} />
+      </div>
+
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+        <Panel>
+          <Label>Operando A</Label>
+          <div style={{ marginBottom: 14 }}>
+            <ComplexPairField mode={inputMode} aVal={aRe} bVal={aIm} onA={setARe} onB={setAIm} color={C.amber} />
+          </div>
+
+          <Label>Operando B</Label>
+          <div style={{ marginBottom: 14 }}>
+            <ComplexPairField mode={inputMode} aVal={bRe} bVal={bIm} onA={setBRe} onB={setBIm} color={C.sky} />
+          </div>
+
+          <Label>Operación</Label>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+            {['+', '−', '×', '÷'].map((o) => (
+              <Btn key={o} active={op === o} onClick={() => setOp(o)}>{o}</Btn>
+            ))}
+          </div>
+
+          <Label>Resultado A {op} B</Label>
+          <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+            {resultErr ? (
+              <span style={{ color: C.danger, fontFamily: MONO }}>⚠ {resultErr}</span>
+            ) : (
+              <>
+                <div style={{ fontFamily: MONO, fontSize: 20, color: C.phosphor }}>{formatComplex(result)}</div>
+                <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(result)}</div>
+              </>
+            )}
+          </div>
+        </Panel>
+
+        <Panel>
+          <Label>Diagrama de Argand</Label>
+          <Argand points={argandPointsOps} />
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== CIRCUIT MODULE (SERIE / PARALELO) ============================== */
+/* ============================== PARSER DE EXPRESIONES COMPLEJAS ==============================
+   Evaluador de expresiones aritméticas sobre números complejos con notación de ingeniería:
+     · literales rectangulares:  13-5j+10   ·   4+j3   ·   j   ·   2.5e3
+     · literales polares:        20.8∠-36.87   (también acepta "<" en vez de "∠", y "°" opcional)
+     · operadores:  +  −  *  /  ∥ (paralelo; también "//" o "||")  y paréntesis
+     · variables Z1…Zn cuando se le pasa un alcance (módulo de impedancias)
+   Precedencia (de mayor a menor):  * /  →  ∥  →  + −
+   Es decir, Z1+Z2∥Z3 se lee como Z1+(Z2∥Z3), igual que la convención de circuitos.
+   Implementación: descenso recursivo — gramática pequeña, errores en español con posición. */
+function par2(a, b) {
+  if (math.abs(a) === 0 || math.abs(b) === 0) return math.complex(0, 0); // rama en corto
+  const den = math.add(a, b);
+  if (math.abs(den) === 0) throw new Error('Paralelo indefinido: Za + Zb = 0 (resonancia ideal, Zeq → ∞)');
+  return math.divide(math.multiply(a, b), den);
+}
+
+function tokenizeZ(srcRaw) {
+  let s = String(srcRaw).replace(/\|\|/g, '∥').replace(/\/\//g, '∥').replace(/\s+/g, '');
+  // normaliza signo menos tipográfico y ohm decorativo
+  s = s.replace(/−/g, '-').replace(/[ΩΩω]|ohm/gi, '');
+  const tokens = [];
+  const re = /(\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)|([jJiI])|([zZ]\d+)|(∠|<)|(°)|([+\-*/()∥])/g;
+  let m, last = 0;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index !== last) throw new Error(`Símbolo no reconocido: "${s.slice(last, m.index)}" (posición ${last + 1})`);
+    if (m[1] !== undefined) tokens.push({ t: 'num', v: parseFloat(m[1]) });
+    else if (m[2] !== undefined) tokens.push({ t: 'j' });
+    else if (m[3] !== undefined) tokens.push({ t: 'var', v: m[3].toUpperCase() });
+    else if (m[4] !== undefined) tokens.push({ t: 'ang' });
+    else if (m[5] !== undefined) { /* ° decorativo: se ignora */ }
+    else tokens.push({ t: m[6] });
+    last = re.lastIndex;
+  }
+  if (last !== s.length) throw new Error(`Símbolo no reconocido: "${s.slice(last)}" (posición ${last + 1})`);
+  return tokens;
+}
+
+/* evalZExpr(cadena, alcance) → math.Complex
+   alcance: objeto { Z1: Complex, Z2: Complex, ... } o vacío para celdas de matriz. */
+function evalZExpr(src, scope = {}) {
+  const toks = tokenizeZ(src);
+  if (toks.length === 0) throw new Error('Expresión vacía');
+  let pos = 0;
+  const peek = () => toks[pos];
+  const eat = (t) => {
+    if (!toks[pos] || toks[pos].t !== t) throw new Error(`Se esperaba "${t}" y se encontró ${toks[pos] ? `"${toks[pos].t === 'num' ? toks[pos].v : toks[pos].t === 'var' ? toks[pos].v : toks[pos].t}"` : 'fin de la expresión'}`);
+    return toks[pos++];
+  };
+
+  function primary() {
+    const tk = peek();
+    if (!tk) throw new Error('Expresión incompleta: falta un valor al final');
+    if (tk.t === '(') {
+      eat('(');
+      const v = addLevel();
+      eat(')');
+      return v;
+    }
+    if (tk.t === 'j') { eat('j'); // j solo, o j3 (estilo 4+j3)
+      const nxt = peek();
+      if (nxt && nxt.t === 'num') { eat('num'); return math.complex(0, nxt.v); }
+      return math.complex(0, 1);
+    }
+    if (tk.t === 'var') {
+      eat('var');
+      if (!(tk.v in scope)) throw new Error(`${tk.v} no está definida en la lista de impedancias`);
+      return scope[tk.v];
+    }
+    if (tk.t === 'num') {
+      eat('num');
+      const nxt = peek();
+      if (nxt && nxt.t === 'j') { eat('j'); return math.complex(0, tk.v); }        // 5j
+      if (nxt && nxt.t === 'ang') {                                                 // 5∠30 | 5∠-30
+        eat('ang');
+        let sign = 1;
+        if (peek() && peek().t === '-') { eat('-'); sign = -1; }
+        else if (peek() && peek().t === '+') { eat('+'); }
+        const ang = eat('num');
+        return math.complex({ r: tk.v, phi: toRad(sign * ang.v) });
+      }
+      return math.complex(tk.v, 0);
+    }
+    throw new Error(`Valor inesperado: "${tk.t}"`);
+  }
+
+  function unary() {
+    if (peek() && peek().t === '-') { eat('-'); return math.multiply(unary(), -1); }
+    if (peek() && peek().t === '+') { eat('+'); return unary(); }
+    return primary();
+  }
+
+  function mulLevel() {
+    let v = unary();
+    while (peek() && (peek().t === '*' || peek().t === '/')) {
+      const op = eat(peek().t).t;
+      const r = unary();
+      if (op === '/') {
+        if (math.abs(r) === 0) throw new Error('División entre cero');
+        v = math.divide(v, r);
+      } else v = math.multiply(v, r);
+    }
+    return v;
+  }
+
+  function parLevel() {
+    let v = mulLevel();
+    while (peek() && peek().t === '∥') {
+      eat('∥');
+      v = par2(v, mulLevel());
+    }
+    return v;
+  }
+
+  function addLevel() {
+    let v = parLevel();
+    while (peek() && (peek().t === '+' || peek().t === '-')) {
+      const op = eat(peek().t).t;
+      const r = parLevel();
+      v = op === '+' ? math.add(v, r) : math.subtract(v, r);
+    }
+    return v;
+  }
+
+  const result = addLevel();
+  if (pos !== toks.length) throw new Error(`Sobra texto a partir de "${toks[pos].t === 'num' ? toks[pos].v : toks[pos].t}"`);
+  if (!isFinite(result.re) || !isFinite(result.im)) throw new Error('El resultado no es finito');
+  return result;
+}
+
+/* ============================== MÓDULO: CIRCUITO POR EXPRESIÓN ==============================
+   Topologías arbitrarias serie/paralelo escritas como expresión con paréntesis:
+   (Z1+Z2)∥Z3 + (Z4+Z5)∥Z6 — el caso que el modo paso a paso no puede representar,
+   porque ahí cada Z nueva se combina contra TODO lo acumulado. Las expresiones también
+   admiten literales numéricos mezclados con las variables: (Z1+Z2)∥(10+5j). */
+function CircuitExprModule() {
+  const [items, setItems] = useState([
+    { id: 1, re: '10', im: '5' }, { id: 2, re: '4', im: '-3' },
+    { id: 3, re: '8', im: '0' }, { id: 4, re: '2', im: '6' },
+    { id: 5, re: '5', im: '-1' }, { id: 6, re: '12', im: '3' },
+  ]);
+  const [nextId, setNextId] = useState(7);
+  const [inputMode, setInputMode] = useState('rect');
+  const [expr, setExpr] = useState('(Z1+Z2)∥Z3 + (Z4+Z5)∥Z6');
+  const exprRef = React.useRef(null);
+
+  const addImpedance = () => {
+    if (items.length >= 12) return;
+    setItems((its) => [...its, { id: nextId, re: '', im: '' }]);
+    setNextId((n) => n + 1);
+  };
+  const removeImpedance = (id) => {
+    if (items.length <= 1) return;
+    setItems((its) => its.filter((it) => it.id !== id));
+  };
+  const updateItem = (id, field, value) => {
+    setItems((its) => its.map((it) => (it.id === id ? { ...it, [field]: value } : it)));
+  };
+  const changeInputMode = (newMode) => {
+    if (newMode === inputMode) return;
+    setItems((its) => its.map((it) => {
+      const z = complexFromPair(inputMode, it.re, it.im);
+      const [a, b] = pairFromComplex(newMode, z || math.complex(0, 0));
+      return { ...it, re: a, im: b };
+    }));
+    setInputMode(newMode);
+  };
+
+  // inserta texto en la posición del cursor del campo de expresión
+  const insertAtCursor = (text) => {
+    const el = exprRef.current;
+    if (!el) { setExpr((e) => e + text); return; }
+    const start = el.selectionStart ?? expr.length;
+    const end = el.selectionEnd ?? expr.length;
+    const next = expr.slice(0, start) + text + expr.slice(end);
+    setExpr(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(start + text.length, start + text.length);
+    });
+  };
+
+  let parseError = '';
+  const scope = {};
+  items.forEach((it, i) => {
+    if (parseError) return;
+    const z = complexFromPair(inputMode, it.re, it.im);
+    if (z === null) { parseError = `Valor inválido en Z${i + 1}`; return; }
+    scope[`Z${i + 1}`] = z;
+  });
+
+  let equivalent = null, exprError = '';
+  if (!parseError && expr.trim() !== '') {
+    try { equivalent = evalZExpr(expr, scope); }
+    catch (e) { exprError = e.message; }
+  }
+  const admittance = (equivalent && math.abs(equivalent) !== 0) ? math.divide(math.complex(1, 0), equivalent) : null;
+
+  const argandPoints = [
+    ...items.map((it, i) => ({
+      label: `Z${i + 1}`,
+      value: complexFromPair(inputMode, it.re, it.im) || math.complex(0, 0),
+      color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length],
+    })),
+    ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor, dash: '6,4', glow: true }] : []),
+  ];
+  const tipPts = argandPoints.map((p) => [p.value.re, p.value.im]).filter((pt) => pt.every(isFinite));
+
+  const InsBtn = ({ text, show }) => (
+    <button onClick={() => insertAtCursor(text)} style={{
+      fontFamily: MONO, fontSize: 12, padding: '5px 10px', background: 'transparent',
+      border: `1px solid ${C.borderLit}`, borderRadius: 3, color: C.text, cursor: 'pointer',
+    }}>{show || text}</button>
+  );
+
+  return (
+    <>
+      <Panel>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+          <Label>Impedancias disponibles</Label>
+          <ModeToggle mode={inputMode} onChange={changeInputMode} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {items.map((it, i) => (
+            <div key={it.id} className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+                Z{i + 1}
+              </span>
+              <ComplexPairField
+                mode={inputMode}
+                aVal={it.re} bVal={it.im}
+                onA={(v) => updateItem(it.id, 're', v)} onB={(v) => updateItem(it.id, 'im', v)}
+                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix=" Ω"
+              />
+              <button
+                onClick={() => removeImpedance(it.id)}
+                disabled={items.length <= 1}
+                style={{
+                  marginLeft: 6, width: 24, height: 24, borderRadius: 3,
+                  border: `1px solid ${C.border}`, background: 'transparent',
+                  color: items.length <= 1 ? C.border : C.danger, fontFamily: MONO,
+                  cursor: items.length <= 1 ? 'default' : 'pointer', lineHeight: 1,
+                }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Btn onClick={addImpedance}>+ AGREGAR IMPEDANCIA</Btn>
+          {items.length >= 12 && <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginLeft: 10 }}>límite de 12</span>}
+        </div>
+      </Panel>
+
+      <Panel>
+        <Label>Expresión de la red (∥ = paralelo, también sirve "//" o "||")</Label>
+        <input
+          ref={exprRef}
+          value={expr}
+          onChange={(e) => setExpr(e.target.value)}
+          spellCheck={false}
+          placeholder="(Z1+Z2)∥Z3 + (Z4+Z5)∥Z6"
+          style={{
+            width: '100%', boxSizing: 'border-box', fontFamily: MONO, fontSize: 16,
+            color: C.text, background: C.bg, border: `1px solid ${exprError ? C.danger : C.borderLit}`,
+            borderRadius: 4, padding: '11px 13px', outline: 'none', marginTop: 8,
+          }}
+        />
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
+          <span style={{ fontFamily: MONO, fontSize: 10, color: C.muted }}>insertar:</span>
+          <InsBtn text="+" />
+          <InsBtn text="∥" />
+          <InsBtn text="(" />
+          <InsBtn text=")" />
+          {items.map((_, i) => i < 8 && <InsBtn key={i} text={`Z${i + 1}`} />)}
+        </div>
+        <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 10, lineHeight: 1.7 }}>
+          precedencia: * / → ∥ → + −  (Z1+Z2∥Z3 se lee Z1+(Z2∥Z3); use paréntesis en caso de duda)
+          <br />también acepta literales: (Z1+Z2)∥(10+5j) · Z1+8∠30 · 3*Z2
+        </div>
+      </Panel>
+
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+        <Panel>
+          <Label>Impedancia equivalente de la expresión</Label>
+          {parseError ? (
+            <ErrorBox message={parseError} />
+          ) : exprError ? (
+            <ErrorBox message={exprError} />
+          ) : equivalent ? (
+            <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
+              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              {admittance && (
+                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
+                  Yeq = {formatComplex(admittance, 6)} S · {polarString(admittance)} S
+                </div>
+              )}
+              <div style={{ fontFamily: MONO, fontSize: 11, color: math.abs(equivalent) !== 0 && equivalent.im >= 0 ? C.amber : C.sky, marginTop: 8 }}>
+                {equivalent.im > 1e-9 ? 'carácter inductivo (X > 0)' : equivalent.im < -1e-9 ? 'carácter capacitivo (X < 0)' : 'puramente resistiva'}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>Escriba una expresión para calcular.</div>
+          )}
+        </Panel>
+        <Panel>
+          <Label>Diagrama de Argand</Label>
+          <ZoomPlot segments={originSegments(argandPoints)} tipPoints={tipPts} unit="Ω" height={280} />
+        </Panel>
+      </div>
+    </>
+  );
+}
+
+
+function CircuitModule() {
+  const [structMode, setStructMode] = useState('expr'); // expr | simple
+  const [items, setItems] = useState([
+    { id: 1, re: '10', im: '5' },
+    { id: 2, re: '4', im: '-3' },
+  ]);
+  const [nextId, setNextId] = useState(3);
+  const [combMode, setCombMode] = useState('serie'); // serie | paralelo
+  const [inputMode, setInputMode] = useState('rect'); // rect | polar
+
+  const addImpedance = () => {
+    if (items.length >= 8) return;
+    setItems((its) => [...its, { id: nextId, re: '', im: '' }]);
+    setNextId((n) => n + 1);
+  };
+  const removeImpedance = (id) => {
+    if (items.length <= 1) return;
+    setItems((its) => its.filter((it) => it.id !== id));
+  };
+  const updateItem = (id, field, value) => {
+    setItems((its) => its.map((it) => (it.id === id ? { ...it, [field]: value } : it)));
+  };
+  const changeInputMode = (newMode) => {
+    if (newMode === inputMode) return;
+    setItems((its) => its.map((it) => {
+      const z = complexFromPair(inputMode, it.re, it.im);
+      const [a, b] = pairFromComplex(newMode, z || math.complex(0, 0));
+      return { ...it, re: a, im: b };
+    }));
+    setInputMode(newMode);
+  };
+
+  let values = [];
+  let parseError = '';
+  items.forEach((it, i) => {
+    if (parseError) return;
+    const z = complexFromPair(inputMode, it.re, it.im);
+    if (z === null) { parseError = `Valor inválido en Z${i + 1}`; return; }
+    values.push(z);
+  });
+
+  let equivalent = null, eqError = '';
+  if (!parseError) {
+    try { equivalent = combMode === 'serie' ? seriesEq(values) : parallelEq(values); }
+    catch (e) { eqError = e.message; }
+  }
+  const admittance = (equivalent && math.abs(equivalent) !== 0) ? math.divide(math.complex(1, 0), equivalent) : null;
+
+  const argandPoints = [
+    ...items.map((it, i) => {
+      const z = complexFromPair(inputMode, it.re, it.im) || math.complex(0, 0);
+      return { label: `Z${i + 1}`, value: z, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length] };
+    }),
+    ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor }] : []),
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn active={structMode === 'expr'} onClick={() => setStructMode('expr')}>EXPRESIÓN CON PARÉNTESIS</Btn>
+        <Btn active={structMode === 'simple'} onClick={() => setStructMode('simple')}>SOLO SERIE o SOLO PARALELO</Btn>
+      </div>
+
+      {structMode === 'expr' ? (
+        <CircuitExprModule />
+      ) : (
+      <>
+      <Panel>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+          <Label>Conexión</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn active={combMode === 'serie'} onClick={() => setCombMode('serie')}>SERIE</Btn>
+            <Btn active={combMode === 'paralelo'} onClick={() => setCombMode('paralelo')}>PARALELO</Btn>
+          </div>
+          <ModeToggle mode={inputMode} onChange={changeInputMode} />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {items.map((it, i) => (
+            <div key={it.id} className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+                Z{i + 1}
+              </span>
+              <ComplexPairField
+                mode={inputMode}
+                aVal={it.re} bVal={it.im}
+                onA={(v) => updateItem(it.id, 're', v)} onB={(v) => updateItem(it.id, 'im', v)}
+                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix=" Ω"
+              />
+              <button
+                onClick={() => removeImpedance(it.id)}
+                disabled={items.length <= 1}
+                style={{
+                  marginLeft: 6, width: 24, height: 24, borderRadius: 3,
+                  border: `1px solid ${C.border}`, background: 'transparent',
+                  color: items.length <= 1 ? C.border : C.danger, fontFamily: MONO,
+                  cursor: items.length <= 1 ? 'default' : 'pointer', lineHeight: 1,
+                }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <Btn onClick={addImpedance}>+ AGREGAR IMPEDANCIA</Btn>
+        </div>
+      </Panel>
+
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+        <Panel>
+          <Label>
+            Impedancia equivalente ({combMode === 'serie' ? 'Zeq = Z1 + Z2 + …' : '1/Zeq = 1/Z1 + 1/Z2 + …'})
+          </Label>
+          {parseError ? (
+            <ErrorBox message={parseError} />
+          ) : eqError ? (
+            <ErrorBox message={eqError} />
+          ) : (
+            <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
+              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              {admittance && (
+                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
+                  Yeq = {formatComplex(admittance)} S &nbsp;·&nbsp; {polarString(admittance)} S
+                </div>
+              )}
+            </div>
+          )}
+        </Panel>
+
+        <Panel>
+          <Label>Diagrama de Argand</Label>
+          <Argand points={argandPoints} />
+        </Panel>
+      </div>
+      </>
+      )}
+    </div>
+  );
+}
+
+/* ============================== MÓDULO: CRECIMIENTO PASO A PASO (ESTILO LIBRO DE TEXTO) ==============================
+   Se parte de Z1. En cada paso siguiente se agrega una impedancia nueva y se decide si se
+   combina EN SERIE o EN PARALELO con todo lo que ya se acumuló. La expresión simbólica se
+   muestra creciendo con sus paréntesis, y debajo un desglose fila por fila con el valor
+   numérico de cada etapa — igual que se vería la resolución en un libro de texto. */
+
+function ComponentsModule() {
+  const [freqMode, setFreqMode] = useState('f'); // 'f' (Hz) | 'w' (rad/s)
+  const [freqVal, setFreqVal] = useState('60');
+  const [items, setItems] = useState([
+    { id: 1, kind: 'R', value: '100', combine: null },
+    { id: 2, kind: 'L', value: '50', combine: 'serie' },
+  ]);
+  const [nextId, setNextId] = useState(3);
+
+  const fNum = parseFloat(freqVal);
+  const freqValid = !isNaN(fNum) && fNum > 0;
+  const omega = freqValid ? (freqMode === 'f' ? 2 * Math.PI * fNum : fNum) : null;
+  const fHz = freqValid ? (freqMode === 'f' ? fNum : fNum / (2 * Math.PI)) : null;
+
+  const addItem = (combine) => {
+    if (items.length >= 10) return;
+    setItems((its) => [...its, { id: nextId, kind: 'R', value: '', combine }]);
+    setNextId((n) => n + 1);
+  };
+  const removeItem = (id) => {
+    setItems((its) => {
+      if (its.length <= 1) return its;
+      const idx = its.findIndex((it) => it.id === id);
+      if (idx === -1) return its;
+      const rest = its.filter((it) => it.id !== id);
+      if (idx === 0) rest[0] = { ...rest[0], combine: null };
+      return rest;
+    });
+  };
+  const updateKind = (id, kind) => setItems((its) => its.map((it) => (it.id === id ? { ...it, kind } : it)));
+  const updateValue = (id, value) => setItems((its) => its.map((it) => (it.id === id ? { ...it, value } : it)));
+  const updateCombine = (id, combine) => setItems((its) => its.map((it) => (it.id === id ? { ...it, combine } : it)));
+
+  const unitFor = (kind) => (kind === 'R' ? 'Ω' : kind === 'L' ? 'mH' : 'µF');
+
+  let trace = [], traceError = '';
+  if (!freqValid) {
+    traceError = 'Ingresa una frecuencia mayor que 0 para calcular las reactancias.';
+  } else {
+    try { trace = computeComponentTrace(items, omega); }
+    catch (e) { traceError = e.message; }
+  }
+
+  const final = trace.length ? trace[trace.length - 1] : null;
+  const equivalent = final ? final.value : null;
+  const admittance = (equivalent && math.abs(equivalent) !== 0) ? math.divide(math.complex(1, 0), equivalent) : null;
+
+  const argandPoints = [
+    ...trace.map((row, i) => ({ label: row.label, value: row.z, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length] })),
+    ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor }] : []),
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Panel>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+          <Label>Frecuencia de trabajo</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn active={freqMode === 'f'} accent={C.amber} onClick={() => setFreqMode('f')}>f (Hz)</Btn>
+            <Btn active={freqMode === 'w'} accent={C.sky} onClick={() => setFreqMode('w')}>ω (rad/s)</Btn>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <TextField value={freqVal} onChange={setFreqVal} placeholder={freqMode === 'f' ? 'f' : 'ω'} width={100} />
+          <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{freqMode === 'f' ? 'Hz' : 'rad/s'}</span>
+          {freqValid && (
+            <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>
+              {freqMode === 'f' ? `→ ω = 2πf = ${round(omega, 3)} rad/s` : `→ f = ω / 2π = ${round(fHz, 3)} Hz`}
+            </span>
+          )}
+        </div>
+        {!freqValid && <ErrorBox message="La frecuencia debe ser un número mayor que 0." />}
+      </Panel>
+
+      <Panel>
+        <Label>Vaya agregando R (Ω), L (mH) o C (µF) — cada nuevo elemento se combina con TODO lo acumulado, en serie o en paralelo</Label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+          {items.map((it, i) => (
+            <div key={it.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {i > 0 && (
+                <div className="qz-item-row" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 2 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>se une</span>
+                  <Btn active={it.combine !== 'paralelo'} accent={C.amber} onClick={() => updateCombine(it.id, 'serie')}>SERIE</Btn>
+                  <Btn active={it.combine === 'paralelo'} accent={C.sky} onClick={() => updateCombine(it.id, 'paralelo')}>PARALELO</Btn>
+                  <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>con lo acumulado</span>
+                </div>
+              )}
+              <div className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+                  {it.kind}{i + 1}
+                </span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <Btn active={it.kind === 'R'} onClick={() => updateKind(it.id, 'R')}>R</Btn>
+                  <Btn active={it.kind === 'L'} onClick={() => updateKind(it.id, 'L')}>L</Btn>
+                  <Btn active={it.kind === 'C'} onClick={() => updateKind(it.id, 'C')}>C</Btn>
+                </div>
+                <TextField
+                  value={it.value} onChange={(v) => updateValue(it.id, v)}
+                  placeholder={unitFor(it.kind)} color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78}
+                />
+                <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{unitFor(it.kind)}</span>
+                <button
+                  onClick={() => removeItem(it.id)}
+                  disabled={items.length <= 1}
+                  style={{
+                    marginLeft: 6, width: 24, height: 24, borderRadius: 3,
+                    border: `1px solid ${C.border}`, background: 'transparent',
+                    color: items.length <= 1 ? C.border : C.danger, fontFamily: MONO,
+                    cursor: items.length <= 1 ? 'default' : 'pointer', lineHeight: 1,
+                  }}
+                >×</button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Btn onClick={() => addItem('serie')} accent={C.amber}>+ AGREGAR EN SERIE</Btn>
+          <Btn onClick={() => addItem('paralelo')} accent={C.sky}>+ AGREGAR EN PARALELO</Btn>
+        </div>
+        {items.length >= 10 && (
+          <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 8 }}>Límite de 10 elementos alcanzado.</div>
+        )}
+      </Panel>
+
+      <Panel>
+        <Label>Expresión acumulada</Label>
+        {traceError ? (
+          <ErrorBox message={traceError} />
+        ) : (
+          <div style={{
+            fontFamily: MONO, fontSize: 18, color: C.phosphor, background: C.bg,
+            border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px',
+            overflowX: 'auto', whiteSpace: 'nowrap',
+          }}>
+            Zeq = {final ? final.expr : '—'}
+          </div>
+        )}
+      </Panel>
+
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+        <Panel>
+          <Label>Conversión f → jX y seguimiento del cálculo</Label>
+          {!traceError && trace.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+              {trace.map((row, i) => (
+                <div key={row.id} style={{
+                  display: 'flex', flexDirection: 'column', gap: 2,
+                  borderLeft: `3px solid ${row.mode === null ? C.muted : (row.mode === 'serie' ? C.amber : C.sky)}`,
+                  paddingLeft: 10,
+                }}>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>
+                    {row.label} = {row.rawValue || '0'} {unitFor(row.kind)}
+                    {row.kind === 'L' ? ' → jωL' : row.kind === 'C' ? ' → −j/(ωC)' : ' (resistivo puro)'}
+                    &nbsp;⇒&nbsp; {formatComplex(row.z)} Ω
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 13, color: row.id === (final && final.id) ? C.phosphor : C.text }}>
+                    {row.expr} = {formatComplex(row.value)} Ω
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!traceError && equivalent && (
+            <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
+              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              {admittance && (
+                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
+                  Yeq = {formatComplex(admittance)} S &nbsp;·&nbsp; {polarString(admittance)} S
+                </div>
+              )}
+            </div>
+          )}
+        </Panel>
+
+        <Panel>
+          <Label>Diagrama de Argand</Label>
+          <Argand points={argandPoints} />
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== MÓDULO: FASORES — TENSIONES / CORRIENTES ==============================
+   Suma fasores de tensión o corriente (superposición tipo LKV/LKC) preservando magnitud y
+   fase de cada uno. El resultado se refleja en dos diagramas: el Argand estándar (todos los
+   vectores partiendo del origen, ahora con puntas de flecha) y una construcción punta-cola
+   que muestra gráficamente cómo se va acumulando la suma hasta llegar al fasor resultante. */
+function PhasorModule() {
+  const [kind, setKind] = useState('V'); // 'V' (tensiones) | 'I' (corrientes)
+  const [inputMode, setInputMode] = useState('polar'); // rect | polar
+  const [convention, setConvention] = useState('rms'); // valores ingresados como pico | rms (solo informativo)
+  const [phasors, setPhasors] = useState([
+    { id: 1, sign: '+', re: '120', im: '0' },
+    { id: 2, sign: '+', re: '120', im: '-120' },
+    { id: 3, sign: '+', re: '120', im: '120' },
+  ]);
+  const [nextId, setNextId] = useState(4);
+
+  const unit = kind === 'V' ? 'V' : 'A';
+  const prefix = kind;
+
+  const addPhasor = () => {
+    if (phasors.length >= 8) return;
+    setPhasors((ps) => [...ps, { id: nextId, sign: '+', re: '', im: '' }]);
+    setNextId((n) => n + 1);
+  };
+  const removePhasor = (id) => {
+    if (phasors.length <= 1) return;
+    setPhasors((ps) => ps.filter((p) => p.id !== id));
+  };
+  const updateField = (id, field, value) => {
+    setPhasors((ps) => ps.map((p) => (p.id === id ? { ...p, [field]: value } : p)));
+  };
+  const toggleSign = (id) => {
+    setPhasors((ps) => ps.map((p) => (p.id === id ? { ...p, sign: p.sign === '+' ? '−' : '+' } : p)));
+  };
+  const changeInputMode = (newMode) => {
+    if (newMode === inputMode) return;
+    setPhasors((ps) => ps.map((p) => {
+      const z = complexFromPair(inputMode, p.re, p.im);
+      const [a, b] = pairFromComplex(newMode, z || math.complex(0, 0));
+      return { ...p, re: a, im: b };
+    }));
+    setInputMode(newMode);
+  };
+
+  let parseError = '';
+  const signedValues = phasors.map((p, i) => {
+    const z = complexFromPair(inputMode, p.re, p.im);
+    if (z === null) { if (!parseError) parseError = `Valor inválido en ${prefix}${i + 1}`; return math.complex(0, 0); }
+    return p.sign === '−' ? math.multiply(z, -1) : z;
+  });
+
+  const resultant = parseError ? null : signedValues.reduce((acc, z) => math.add(acc, z), math.complex(0, 0));
+  const resMag = resultant ? math.abs(resultant) : 0;
+  const altMag = convention === 'rms' ? resMag * Math.SQRT2 : resMag / Math.SQRT2;
+
+  const signedLabel = (i) => `${phasors[i].sign === '−' ? '−' : ''}${prefix}${i + 1}`;
+  const exprText = phasors
+    .map((p, i) => (i === 0 ? signedLabel(i) : ` ${p.sign === '−' ? '−' : '+'} ${prefix}${i + 1}`))
+    .join('');
+
+  const chainPoints = phasors.map((p, i) => ({
+    label: signedLabel(i), value: signedValues[i], color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length],
+  }));
+  const argandPoints = [
+    ...chainPoints,
+    ...(resultant ? [{ label: `${prefix}total`, value: resultant, color: C.phosphor }] : []),
+  ];
+
+  /* segmentos para los lienzos con zoom: mismo contenido que Argand/punta-cola clásicos */
+  const originSegs = originSegments(argandPoints.map((p) =>
+    resultant && p.label === `${prefix}total` ? { ...p, dash: '6,4', glow: true } : p
+  ));
+  const chainBuild = chainSegments(chainPoints);
+  const chainSegsAll = [
+    ...chainBuild.segs,
+    { x1: 0, y1: 0, x2: chainBuild.resultant.re, y2: chainBuild.resultant.im,
+      color: C.phosphor, label: `${prefix}total`, labelAt: 'tip', dash: '6,4', glow: true, width: 2 },
+  ];
+  const tipPtsOrigin = argandPoints
+    .map((p) => [p.value.re, p.value.im])
+    .filter((pt) => pt.every(isFinite));
+  const tipPtsChain = (() => {
+    let acc = math.complex(0, 0); const arr = [];
+    chainPoints.forEach((p) => {
+      if (isFinite(p.value.re) && isFinite(p.value.im)) acc = math.add(acc, p.value);
+      arr.push([acc.re, acc.im]);
+    });
+    return arr;
+  })();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Panel>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn active={kind === 'V'} accent={C.amber} onClick={() => setKind('V')}>TENSIONES (V)</Btn>
+            <Btn active={kind === 'I'} accent={C.sky} onClick={() => setKind('I')}>CORRIENTES (I)</Btn>
+          </div>
+          <ModeToggle mode={inputMode} onChange={changeInputMode} />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {phasors.map((p, i) => (
+            <div key={p.id} className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                onClick={() => toggleSign(p.id)}
+                title="alternar polaridad en la suma"
+                style={{
+                  width: 26, height: 26, borderRadius: 3,
+                  border: `1px solid ${CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]}`, background: 'transparent',
+                  color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], fontFamily: MONO, fontSize: 13,
+                  cursor: 'pointer', lineHeight: 1,
+                }}
+              >{p.sign}</button>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 30 }}>
+                {prefix}{i + 1}
+              </span>
+              <ComplexPairField
+                mode={inputMode}
+                aVal={p.re} bVal={p.im}
+                onA={(v) => updateField(p.id, 're', v)} onB={(v) => updateField(p.id, 'im', v)}
+                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix={` ${unit}`}
+              />
+              <button
+                onClick={() => removePhasor(p.id)}
+                disabled={phasors.length <= 1}
+                style={{
+                  marginLeft: 6, width: 24, height: 24, borderRadius: 3,
+                  border: `1px solid ${C.border}`, background: 'transparent',
+                  color: phasors.length <= 1 ? C.border : C.danger, fontFamily: MONO,
+                  cursor: phasors.length <= 1 ? 'default' : 'pointer', lineHeight: 1,
+                }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Btn onClick={addPhasor}>+ AGREGAR {prefix === 'V' ? 'TENSIÓN' : 'CORRIENTE'}</Btn>
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>
+            el botón +/− de cada fila fija su polaridad al sumar
+          </span>
+        </div>
+        {phasors.length >= 8 && (
+          <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 8 }}>Límite de 8 fasores alcanzado.</div>
+        )}
+      </Panel>
+
+      <Panel>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 6 }}>
+          <Label>Suma fasorial</Label>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>valores ingresados en</span>
+            <Btn active={convention === 'peak'} onClick={() => setConvention('peak')}>PICO</Btn>
+            <Btn active={convention === 'rms'} onClick={() => setConvention('rms')}>RMS</Btn>
+          </div>
+        </div>
+        {parseError ? (
+          <ErrorBox message={parseError} />
+        ) : (
+          <>
+            <div style={{
+              fontFamily: MONO, fontSize: 16, color: C.text, background: C.bg,
+              border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px',
+              overflowX: 'auto', whiteSpace: 'nowrap', marginBottom: 12,
+            }}>
+              {prefix}total = {exprText}
+            </div>
+            <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(resultant)} {unit}</div>
+              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(resultant)} {unit}</div>
+              <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
+                {convention === 'rms' ? 'valor pico equivalente' : 'valor eficaz (RMS) equivalente'}: {round(altMag, 4)} {unit}
+              </div>
+            </div>
+          </>
+        )}
+      </Panel>
+
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <Panel>
+          <Label>Diagrama fasorial (vectores desde el origen)</Label>
+          <ZoomPlot segments={originSegs} tipPoints={tipPtsOrigin} unit={unit} height={300} />
+        </Panel>
+        <Panel>
+          <Label>Suma vectorial punta-cola ({prefix}total en línea punteada)</Label>
+          <ZoomPlot segments={chainSegsAll} tipPoints={tipPtsChain} unit={unit} height={300} />
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== MATRIX GRID INPUT ============================== */
+function MatrixGrid({ grid, onCell, color, cellSize = 46 }) {
+  return (
+    <div style={{ display: 'inline-grid', gridTemplateColumns: `repeat(${grid[0].length}, ${cellSize}px)`, gap: 4 }}>
+      {grid.map((row, i) =>
+        row.map((val, j) => (
+          <input
+            key={`${i}-${j}`}
+            value={val}
+            placeholder="0"
+            onChange={(e) => onCell(i, j, e.target.value)}
+            style={{
+              width: cellSize,
+              height: 30,
+              background: C.bg,
+              border: `1px solid ${C.border}`,
+              borderRadius: 3,
+              color: color,
+              fontFamily: MONO,
+              fontSize: 11,
+              textAlign: 'center',
+              outline: 'none',
+              padding: 0,
+            }}
+            onFocus={(e) => (e.target.style.borderColor = color)}
+            onBlur={(e) => (e.target.style.borderColor = C.border)}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+function SizeStepper({ label, value, onChange }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <span style={{ fontFamily: SANS, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
+      <button onClick={() => onChange(Math.max(1, value - 1))} style={stepperBtnStyle}>−</button>
+      <span style={{ fontFamily: MONO, fontSize: 14, color: C.text, width: 18, textAlign: 'center' }}>{value}</span>
+      <button onClick={() => onChange(Math.min(9, value + 1))} style={stepperBtnStyle}>+</button>
+    </div>
+  );
+}
+const stepperBtnStyle = {
+  width: 22, height: 22, borderRadius: 3, border: `1px solid ${C.border}`,
+  background: 'transparent', color: C.text, fontFamily: MONO, cursor: 'pointer', lineHeight: 1,
+};
+
+function MatrixResultView({ result, error }) {
+  if (error) return <ErrorBox message={error} />;
+  if (result === null) return <div style={{ color: C.muted, fontFamily: MONO, fontSize: 13 }}>—</div>;
+  if (result.kind === 'scalar') {
+    return (
+      <div>
+        <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(result.value)}</div>
+        <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(result.value)}</div>
+      </div>
+    );
+  }
+  if (result.kind === 'matrix') {
+    const M = result.value;
+    return (
+      <div style={{ display: 'inline-grid', gridTemplateColumns: `repeat(${M[0].length}, minmax(70px, auto))`, gap: 4 }}>
+        {M.map((row, i) =>
+          row.map((c, j) => (
+            <div key={`${i}-${j}`} style={{
+              background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 3,
+              padding: '4px 6px', fontFamily: MONO, fontSize: 12, color: C.phosphor, textAlign: 'center',
+            }}>
+              {formatComplex(c)}
+            </div>
+          ))
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+/* ============================== MATRIX MODULE: OPERACIONES A, B ============================== */
+function MatrixOpsModule() {
+  const [rowsA, setRowsA] = useState(3); const [colsA, setColsA] = useState(3);
+  const [rowsB, setRowsB] = useState(3); const [colsB, setColsB] = useState(3);
+  const [gridA, setGridA] = useState(makeGrid(3, 3));
+  const [gridB, setGridB] = useState(makeGrid(3, 3));
+  const [target, setTarget] = useState('A');
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const updateRowsA = (v) => { setRowsA(v); setGridA((g) => resizeGrid(g, v, colsA)); };
+  const updateColsA = (v) => { setColsA(v); setGridA((g) => resizeGrid(g, rowsA, v)); };
+  const updateRowsB = (v) => { setRowsB(v); setGridB((g) => resizeGrid(g, v, colsB)); };
+  const updateColsB = (v) => { setColsB(v); setGridB((g) => resizeGrid(g, rowsB, v)); };
+
+  const cellA = (i, j, v) => setGridA((g) => { const ng = g.map((r) => r.slice()); ng[i][j] = v; return ng; });
+  const cellB = (i, j, v) => setGridB((g) => { const ng = g.map((r) => r.slice()); ng[i][j] = v; return ng; });
+
+  const run = (fn) => {
+    setError('');
+    try {
+      const out = fn();
+      setResult(out);
+    } catch (e) {
+      setResult(null);
+      setError(e.message || 'Error de cálculo');
+    }
+  };
+
+  const binaryOp = (kind) => run(() => {
+    const A = gridToComplex(gridA), B = gridToComplex(gridB);
+    if (kind === 'add' || kind === 'sub') {
+      if (rowsA !== rowsB || colsA !== colsB) throw new Error('A y B deben tener las mismas dimensiones');
+      return { kind: 'matrix', value: kind === 'add' ? math.add(A, B) : math.subtract(A, B) };
+    }
+    if (kind === 'mul') {
+      if (colsA !== rowsB) throw new Error(`Dimensiones incompatibles: A es ${rowsA}×${colsA}, B es ${rowsB}×${colsB}`);
+      return { kind: 'matrix', value: math.multiply(A, B) };
+    }
+  });
+
+  const unaryOp = (kind) => run(() => {
+    const grid = target === 'A' ? gridA : gridB;
+    const rows = target === 'A' ? rowsA : rowsB;
+    const cols = target === 'A' ? colsA : colsB;
+    const M = gridToComplex(grid);
+    if (kind === 'transpose') return { kind: 'matrix', value: math.transpose(M) };
+    if (kind === 'conj') return { kind: 'matrix', value: conjMatrix(M) };
+    if (kind === 'ctranspose') return { kind: 'matrix', value: ctranspose(M) };
+    if (kind === 'det') {
+      if (rows !== cols) throw new Error('El determinante requiere una matriz cuadrada');
+      return { kind: 'scalar', value: math.det(M) };
+    }
+    if (kind === 'inv') {
+      if (rows !== cols) throw new Error('La inversa requiere una matriz cuadrada');
+      return { kind: 'matrix', value: math.inv(M) };
+    }
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <Panel>
+          <div className="qz-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <Label>Matriz A</Label>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+              <SizeStepper label="Filas" value={rowsA} onChange={updateRowsA} />
+              <SizeStepper label="Col" value={colsA} onChange={updateColsA} />
+            </div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <MatrixGrid grid={gridA} onCell={cellA} color={C.amber} />
+          </div>
+        </Panel>
+
+        <Panel>
+          <div className="qz-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <Label>Matriz B</Label>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+              <SizeStepper label="Filas" value={rowsB} onChange={updateRowsB} />
+              <SizeStepper label="Col" value={colsB} onChange={updateColsB} />
+            </div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <MatrixGrid grid={gridB} onCell={cellB} color={C.sky} />
+          </div>
+        </Panel>
+      </div>
+
+      <Panel>
+        <Label>Operaciones binarias (A, B)</Label>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+          <Btn onClick={() => binaryOp('add')}>A + B</Btn>
+          <Btn onClick={() => binaryOp('sub')}>A − B</Btn>
+          <Btn onClick={() => binaryOp('mul')}>A × B</Btn>
+        </div>
+
+        <Label>Operación sobre una matriz</Label>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>Objetivo:</span>
+          <Btn active={target === 'A'} accent={C.amber} onClick={() => setTarget('A')}>A</Btn>
+          <Btn active={target === 'B'} accent={C.sky} onClick={() => setTarget('B')}>B</Btn>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <Btn onClick={() => unaryOp('transpose')}>Transpuesta (Mᵀ)</Btn>
+          <Btn onClick={() => unaryOp('conj')}>Conjugada (M̄)</Btn>
+          <Btn onClick={() => unaryOp('ctranspose')}>Conj. transpuesta (Mᴴ)</Btn>
+          <Btn onClick={() => unaryOp('det')}>Determinante</Btn>
+          <Btn onClick={() => unaryOp('inv')}>Inversa (M⁻¹)</Btn>
+        </div>
+      </Panel>
+
+      <Panel>
+        <Label>Resultado</Label>
+        <div style={{ overflowX: 'auto' }}>
+          <MatrixResultView result={result} error={error} />
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+/* ============================== MATRIX MODULE: RESOLVER SISTEMA Mx = B (NODAL / MALLAS) ==============================
+   Cierra el círculo del análisis de circuitos: el alumno ya arma la matriz de admitancias
+   (nodal) o impedancias (mallas) y el vector de fuentes independientes, y la consola entrega
+   directamente el vector de incógnitas x = M⁻¹B — sin que tenga que multiplicar la inversa
+   por el vector a mano. Debajo se muestra M·x recalculado como verificación contra B. */
+function SystemSolverModule() {
+  const [convention, setConvention] = useState('nodal'); // 'nodal' (Y·V = I) | 'mallas' (Z·I = V)
+  const [n, setN] = useState(2);
+  const [gridM, setGridM] = useState(makeGrid(2, 2));
+  const [gridB, setGridB] = useState(makeGrid(2, 1));
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const labels = convention === 'nodal'
+    ? { M: 'Y', mName: 'admitancias', in: 'I', inName: 'corrientes de nodo', out: 'V', outName: 'voltajes de nodo', unitIn: 'A', unitOut: 'V' }
+    : { M: 'Z', mName: 'impedancias de malla', in: 'V', inName: 'voltajes de malla', out: 'I', outName: 'corrientes de malla', unitIn: 'V', unitOut: 'A' };
+
+  const updateN = (v) => {
+    setN(v);
+    setGridM((g) => resizeGrid(g, v, v));
+    setGridB((g) => resizeGrid(g, v, 1));
+    setResult(null); setError('');
+  };
+  const cellM = (i, j, v) => setGridM((g) => { const ng = g.map((r) => r.slice()); ng[i][j] = v; return ng; });
+  const cellB = (i, j, v) => setGridB((g) => { const ng = g.map((r) => r.slice()); ng[i][j] = v; return ng; });
+
+  const solve = () => {
+    setError('');
+    try {
+      const M = gridToComplex(gridM);
+      const Bcol = gridToComplex(gridB);
+      const detM = math.det(M);
+      if (math.abs(detM) < 1e-9) {
+        throw new Error(`La matriz ${labels.M} es singular (det ≈ 0): el sistema no tiene solución única.`);
+      }
+      const Minv = math.inv(M);
+      const Xcol = math.multiply(Minv, Bcol);
+      const x = Xcol.map((row) => row[0]);
+      const check = math.multiply(M, Xcol).map((row) => row[0]);
+      const bUsed = Bcol.map((row) => row[0]);
+      setResult({ x, check, bUsed });
+    } catch (e) {
+      setResult(null);
+      setError(e.message || 'No se pudo resolver el sistema.');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Panel>
+        <div className="qz-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <Label>Convención</Label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Btn active={convention === 'nodal'} accent={C.amber} onClick={() => setConvention('nodal')}>NODAL (Y·V = I)</Btn>
+            <Btn active={convention === 'mallas'} accent={C.sky} onClick={() => setConvention('mallas')}>MALLAS (Z·I = V)</Btn>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14, flexWrap: 'wrap' }}>
+          <SizeStepper label="Orden n" value={n} onChange={updateN} />
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>
+            sistema {n}×{n}: {labels.M} · {labels.out} = {labels.in}
+          </span>
+        </div>
+
+        <div className="qz-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+          <div>
+            <Label>Matriz {labels.M} ({labels.mName}) — {n}×{n}</Label>
+            <div style={{ overflowX: 'auto' }}>
+              <MatrixGrid grid={gridM} onCell={cellM} color={C.amber} />
+            </div>
+          </div>
+          <div>
+            <Label>Vector {labels.in} ({labels.inName}) — {n}×1</Label>
+            <div style={{ overflowX: 'auto' }}>
+              <MatrixGrid grid={gridB} onCell={cellB} color={C.sky} />
+            </div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          <Btn onClick={solve}>RESOLVER → {labels.out} = {labels.M}⁻¹{labels.in}</Btn>
+        </div>
+      </Panel>
+
+      <Panel>
+        <Label>Resultado: {labels.outName}</Label>
+        {error ? (
+          <ErrorBox message={error} />
+        ) : result ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {result.x.map((val, i) => (
+              <div key={i} style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px' }}>
+                <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginBottom: 4 }}>{labels.out}{i + 1}</div>
+                <div style={{ fontFamily: MONO, fontSize: 18, color: C.phosphor }}>{formatComplex(val)} {labels.unitOut}</div>
+                <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 2 }}>{polarString(val)} {labels.unitOut}</div>
+              </div>
+            ))}
+            <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>
+              verificación {labels.M}·{labels.out} = {result.check.map((c) => formatComplex(c)).join(', ')} {labels.unitIn}
+              &nbsp;(debe coincidir con {labels.in} = {result.bUsed.map((c) => formatComplex(c)).join(', ')} {labels.unitIn})
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: C.muted, fontFamily: MONO, fontSize: 13 }}>—</div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+/* ============================== MATRIX MODULE: SELECTOR ============================== */
+function MatrixModule() {
+  const [matMode, setMatMode] = useState('ops'); // 'ops' | 'solve'
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn active={matMode === 'ops'} onClick={() => setMatMode('ops')}>OPERACIONES (A, B)</Btn>
+        <Btn active={matMode === 'solve'} onClick={() => setMatMode('solve')}>RESOLVER SISTEMA Mx = B (NODAL / MALLAS)</Btn>
+      </div>
+      <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+        las celdas aceptan expresiones: <span style={{ color: C.text }}>13-5j+10</span> · <span style={{ color: C.text }}>5∠30 + 2∠-45</span> · <span style={{ color: C.text }}>(3+4j)*2</span> · <span style={{ color: C.text }}>10∥(5+5j)</span>
+      </div>
+      {matMode === 'ops' ? <MatrixOpsModule /> : <SystemSolverModule />}
+    </div>
+  );
+}
+
+/* ============================== APP ROOT ============================== */
+function App() {
+  const [mode, setMode] = useState('complex');
+  return (
+    <div className="qz-root" style={{ background: C.bg, minHeight: '100%', padding: 24, fontFamily: SANS, color: C.text }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        input::placeholder { color: ${C.muted}; }
+
+        /* ===================================================================
+           Diseño responsivo: horizontal en escritorio (comportamiento original
+           sin cambios), y apilado en formato VERTICAL en pantallas de celular.
+           Todo lo de abajo solo se activa por debajo de 760px de ancho.
+        =================================================================== */
+        @media (max-width: 760px) {
+          .qz-root { padding: 12px !important; }
+          .qz-tag { font-size: 10px !important; }
+          .qz-h1 { font-size: 21px !important; }
+
+          /* Pestañas de módulo: de fila horizontal a columna vertical, botones a
+             ancho completo — mucho más fácil de tocar con el dedo. */
+          .qz-tabs { flex-direction: column; }
+          .qz-tabs button {
+            width: 100%;
+            white-space: normal !important;
+            text-align: center;
+            font-size: 12.5px !important;
+            padding: 12px 10px !important;
+          }
+
+          /* Cuadrículas de dos columnas (panel + diagrama de Argand, Matriz A/B, etc.)
+             pasan de "1.3fr 1fr" / "1fr 1fr" a una sola columna apilada. */
+          .qz-grid-2 { grid-template-columns: 1fr !important; }
+
+          /* Menos relleno interno en cada panel para aprovechar el ancho angosto. */
+          .qz-panel { padding: 12px !important; }
+
+          /* Filas de ítems (impedancias, fasores, pares R/X) se envuelven en vez
+             de desbordarse fuera de la pantalla. */
+          .qz-item-row { flex-wrap: wrap; row-gap: 8px; }
+          .qz-field-pair { flex-wrap: wrap; row-gap: 6px; }
+          .qz-panel-header { flex-wrap: wrap; row-gap: 10px; }
+        }
+      `}</style>
+
+      <div style={{ marginBottom: 20 }}>
+        <div className="qz-tag" style={{ fontFamily: MONO, fontSize: 11, letterSpacing: '0.2em', color: C.phosphor, textTransform: 'uppercase' }}>
+          ◈ instrumento de cálculo
+        </div>
+        <h1 className="qz-h1" style={{ fontFamily: SANS, fontWeight: 700, fontSize: 28, margin: '4px 0 2px' }}>Consola Z</h1>
+      </div>
+
+      <div className="qz-tabs" style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: `1px solid ${C.border}`, paddingBottom: 16, flexWrap: 'wrap' }}>
+        <Btn active={mode === 'complex'} onClick={() => setMode('complex')}>NÚMEROS COMPLEJOS</Btn>
+        <Btn active={mode === 'circuit'} onClick={() => setMode('circuit')}>IMPEDANCIAS SERIE/PARALELO</Btn>
+        <Btn active={mode === 'components'} onClick={() => setMode('components')}>COMPONENTES (f, L, C → jX)</Btn>
+        <Btn active={mode === 'phasor'} onClick={() => setMode('phasor')}>FASORES V / I</Btn>
+        <Btn active={mode === 'regulation'} onClick={() => setMode('regulation')}>REGULACIÓN / MÁQUINA</Btn>
+        <Btn active={mode === 'matrix'} onClick={() => setMode('matrix')}>MATRICES COMPLEJAS</Btn>
+      </div>
+
+      {mode === 'complex' ? <ComplexModule />
+        : mode === 'circuit' ? <CircuitModule />
+        : mode === 'components' ? <ComponentsModule />
+        : mode === 'phasor' ? <PhasorModule />
+        : mode === 'regulation' ? <RegulationModule />
+        : <MatrixModule />}
+
+      <div style={{ marginTop: 24, fontFamily: MONO, fontSize: 11, color: C.muted, borderTop: `1px solid ${C.border}`, paddingTop: 12, textAlign: 'center' }}>
+        Hecho por Jesús Peña, UNEFA LARA. Instrumento hecho con apoyo de Anthropic.
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
