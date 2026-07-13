@@ -1,6 +1,6 @@
 # Consola Z
 
-**Instrumento de cálculo para variable compleja e ingeniería eléctrica**, pensado para resolver a mano (pero sin errores de aritmética) los problemas típicos de circuitos, fasores y sistemas nodal/mallas.
+**Instrumento de cálculo para ingeniería eléctrica**, pensado para resolver a mano (pero sin errores de aritmética) los problemas típicos de circuitos, fasores y sistemas nodal/mallas.
 
 Todo corre en un único archivo HTML, sin instalación ni backend: se abre en el navegador y ya.
 
