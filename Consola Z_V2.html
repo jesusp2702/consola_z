@@ -12,35 +12,51 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.4/babel.min.js"></script>
 <!-- mathjs -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.11.0/math.js"></script>
+<!-- KaTeX (renderizado de fórmulas en LaTeX) -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
 
 <style>
-  html, body { margin: 0; padding: 0; background: #0B0F0E; }
+  html, body { margin: 0; padding: 0; background: #0B0F0E; transition: background 160ms ease; }
   #root { min-height: 100vh; }
+  .katex { font-size: 1em; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-const { useState } = React;
+const { useState, useEffect } = React;
 
 
 
 
-/* ============================== TOKENS ============================== */
-const C = {
-  bg: '#0B0F0E',
-  panel: '#121817',
-  panel2: '#161D1B',
-  border: '#1F2B27',
-  borderLit: '#2C3A35',
-  text: '#E6F2EC',
-  muted: '#6B8079',
-  phosphor: '#6EFFC0',
-  amber: '#FFB454',
-  sky: '#5CC8FF',
-  danger: '#FF6B6B',
+/* ============================== TEMAS (NOCHE / DÍA) ==============================
+   `C` es el único punto de verdad del color. App reasigna C antes de renderizar a sus
+   hijos, así que todos los componentes leen el tema vigente sin tocar su código.
+   `series` es la paleta de acentos: cada tema trae la suya, porque los tonos claros
+   del modo noche son ilegibles sobre fondo blanco. */
+const THEMES = {
+  dark: {
+    id: 'dark',
+    bg: '#0B0F0E', panel: '#121817', panel2: '#161D1B',
+    border: '#1F2B27', borderLit: '#2C3A35',
+    text: '#E6F2EC', muted: '#6B8079',
+    phosphor: '#6EFFC0', amber: '#FFB454', sky: '#5CC8FF', violet: '#C792EA', danger: '#FF6B6B',
+    glow: true,
+    series: ['#FFB454', '#5CC8FF', '#C792EA', '#FFD166', '#FF6B6B', '#8BE9FD', '#B4F9C0', '#F7A278'],
+  },
+  light: {
+    id: 'light',
+    bg: '#EAEFEC', panel: '#FFFFFF', panel2: '#F5F8F6',
+    border: '#D2DDD7', borderLit: '#AEC0B7',
+    text: '#0D1A15', muted: '#5A6D65',
+    phosphor: '#02795A', amber: '#9C4E00', sky: '#0A5E93', violet: '#672C9E', danger: '#B3261E',
+    glow: false,
+    series: ['#9C4E00', '#0A5E93', '#672C9E', '#7A5600', '#B3261E', '#0D6577', '#256B3C', '#94401A'],
+  },
 };
+let C = THEMES.dark;
 const MONO = "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace";
 const SANS = "'Space Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif";
 
@@ -104,6 +120,44 @@ function polarString(c) {
   const th = round((math.arg(c) * 180) / Math.PI, 3);
   return `${r} ∠ ${th}°`;
 }
+
+/* ============================== FORMATO LaTeX ==============================
+   Igual que en Consola S: las cantidades rectangulares se muestran entre
+   paréntesis  (a + jb); los reales puros van sin paréntesis. */
+function isFiniteC(c) { return c && isFinite(c.re) && isFinite(c.im); }
+function texNum(n, d = 4) {
+  if (n === null || n === undefined || !isFinite(n)) return '\\text{—}';
+  if (Math.abs(n) < 1e-10) return '0';
+  const a = Math.abs(n);
+  if (a >= 1e7 || a < 1e-4) { const t = n.toExponential(4).split('e'); return `${t[0]}\\times10^{${parseInt(t[1], 10)}}`; }
+  return String(round(n, d));
+}
+function texComplex(c, d = 4) {
+  if (!isFiniteC(c)) return '\\text{—}';
+  const re = round(c.re, d), im = round(c.im, d);
+  if (im === 0) return texNum(re, d);
+  const j = `j${texNum(Math.abs(im), d)}`;
+  if (re === 0) return `(${im < 0 ? '-' : ''}${j})`;
+  return `(${texNum(re, d)} ${im < 0 ? '-' : '+'} ${j})`;
+}
+function texPolar(c, d = 4) {
+  if (!isFiniteC(c)) return '\\text{—}';
+  return `${texNum(round(math.abs(c), d), d)}\\,\\angle\\,${texNum(round(toDeg(math.arg(c)), 3), 3)}^\\circ`;
+}
+function texUnit(u) {
+  if (!u) return '';
+  if (u === 'Ω') return '\\Omega';
+  if (u === 'S') return '\\text{S}';
+  return `\\text{${u}}`;
+}
+function withUnit(tex, u) { return u ? `${tex}\\ ${texUnit(u)}` : tex; }
+/* subíndices/superíndices legibles: V₁ → V_{1}, I·jXs → I\,jX_{s} */
+function texLabel(name) {
+  return String(name)
+    .replace(/₁/g, '_{1}').replace(/₂/g, '_{2}')
+    .replace(/·/g, '\\cdot ')
+    .replace(/Ra/g, 'R_{a}').replace(/Xs/g, 'X_{s}');
+}
 function computeBinary(a, b, op) {
   if (op === '+') return math.add(a, b);
   if (op === '−') return math.subtract(a, b);
@@ -115,7 +169,8 @@ function computeBinary(a, b, op) {
 }
 
 /* ============================== CIRCUIT (SERIE/PARALELO) HELPERS ============================== */
-const CIRCUIT_COLORS = [C.amber, C.sky, '#C792EA', '#FFD166', '#FF6B6B', '#8BE9FD', '#B4F9C0', '#F7A278'];
+/* la paleta vive en el tema: se lee en cada render, no se congela al cargar */
+function circuitColor(i) { return C.series[i % C.series.length]; }
 function seriesEq(list) {
   return list.reduce((acc, z) => math.add(acc, z), math.complex(0, 0));
 }
@@ -247,7 +302,7 @@ function Argand({ points, size = 260 }) {
             <polygon
               points={`${head.tip.x},${head.tip.y} ${head.p2.x},${head.p2.y} ${head.p3.x},${head.p3.y}`}
               fill={p.color}
-              style={{ filter: `drop-shadow(0 0 3px ${p.color})` }}
+              style={{ filter: C.glow ? `drop-shadow(0 0 3px ${p.color})` : 'none' }}
             />
             <text x={x + 7} y={y - 7} fill={p.color} fontSize="11" fontFamily={MONO}>{p.label}</text>
           </g>
@@ -312,7 +367,7 @@ function PhasorChain({ points, size = 280 }) {
             stroke={C.phosphor} strokeWidth="2" strokeDasharray="6,4" opacity="0.95" />
           <polygon
             points={`${resHead.tip.x},${resHead.tip.y} ${resHead.p2.x},${resHead.p2.y} ${resHead.p3.x},${resHead.p3.y}`}
-            fill={C.phosphor} style={{ filter: `drop-shadow(0 0 4px ${C.phosphor})` }}
+            fill={C.phosphor} style={{ filter: C.glow ? `drop-shadow(0 0 4px ${C.phosphor})` : 'none' }}
           />
         </g>
       )}
@@ -538,7 +593,7 @@ function ZoomPlot({ segments, arcs = [], tipPoints = null, height = 320, unit = 
               <polygon
                 points={`${head.tip.x},${head.tip.y} ${head.p2.x},${head.p2.y} ${head.p3.x},${head.p3.y}`}
                 fill={s.color}
-                style={s.glow ? { filter: `drop-shadow(0 0 4px ${s.color})` } : undefined}
+                style={(s.glow && C.glow) ? { filter: `drop-shadow(0 0 4px ${s.color})` } : undefined}
               />
               {s.label && <text x={lx + 7} y={ly - 7} fill={s.color} fontSize="11" fontFamily={MONO}>{s.label}</text>}
             </g>
@@ -697,17 +752,20 @@ function RegulationModule() {
               <Label>Resultados</Label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px' }}>
-                  <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{nameRes} = {nameRef} + {nameR} + {nameX}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 20, color: C.phosphor, marginTop: 4 }}>{polarString(V1)} V</div>
-                  <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 2 }}>{formatComplex(V1)} V</div>
+                  <Tex color={C.muted} size={13}
+                    tex={`${texLabel(nameRes)} = ${texLabel(nameRef)} + ${texLabel(nameR)} + ${texLabel(nameX)}`} />
+                  <div style={{ marginTop: 4 }}><Tex tex={withUnit(texPolar(V1), 'V')} color={C.phosphor} size={20} /></div>
+                  <div style={{ marginTop: 2 }}><Tex tex={withUnit(texComplex(V1), 'V')} color={C.muted} size={13} /></div>
                 </div>
                 <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px', fontFamily: MONO, fontSize: 13, color: C.text, lineHeight: 1.9 }}>
-                  <div>{nameR} = {polarString(VR)} V</div>
-                  <div>{nameX} = {polarString(VX)} V</div>
-                  <div style={{ color: C.danger }}>φ = {round(phi, 3)}° · FP = {round(Math.abs(fp), 4)} {lagging ? '(atraso)' : leading ? '(adelanto)' : '(unitario)'}</div>
-                  <div style={{ color: C.phosphor }}>δ = {round(delta, 4)}°</div>
+                  <div><Tex tex={`${texLabel(nameR)} = ${withUnit(texPolar(VR), 'V')}`} color={C.text} size={14} /></div>
+                  <div><Tex tex={`${texLabel(nameX)} = ${withUnit(texPolar(VX), 'V')}`} color={C.text} size={14} /></div>
+                  <div><Tex color={C.danger} size={14}
+                    tex={`\\varphi = ${texNum(phi, 3)}^\\circ \\;\\cdot\\; \\text{FP} = ${texNum(Math.abs(fp), 4)}\\ \\text{${lagging ? '(atraso)' : leading ? '(adelanto)' : '(unitario)'}}`} /></div>
+                  <div><Tex tex={`\\delta = ${texNum(delta, 4)}^\\circ`} color={C.phosphor} size={14} /></div>
                   {!isSync && (
-                    <div style={{ color: C.amber }}>Regulación = (|V₁|−|V₂|)/|V₂| = {round(reg, 3)} %</div>
+                    <div><Tex color={C.amber} size={14}
+                      tex={`\\text{Regulación} = \\dfrac{|V_{1}|-|V_{2}|}{|V_{2}|} = ${texNum(reg, 3)}\\,\\%`} /></div>
                   )}
                 </div>
                 <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.sky, lineHeight: 1.7, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, padding: '10px 14px' }}>
@@ -803,6 +861,26 @@ function Btn({ children, onClick, active, accent }) {
     </button>
   );
 }
+/* LaTeX vía KaTeX; si KaTeX no cargó, cae a texto monoespaciado sin romper nada. */
+function Tex({ tex, display = false, color, size }) {
+  const src = tex == null ? '' : String(tex);
+  let html = null;
+  try {
+    if (typeof katex !== 'undefined') html = katex.renderToString(src, { displayMode: display, throwOnError: false, output: 'htmlAndMathml' });
+  } catch (e) { html = null; }
+  if (html === null) return <span style={{ fontFamily: MONO, color, fontSize: size }}>{src}</span>;
+  return <span style={{ color, fontSize: size, display: display ? 'block' : 'inline-block' }} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+/* Lectura de instrumento: valor grande en LaTeX + polar debajo. */
+function TexReadout({ tex, subTex, extra, color, size = 22 }) {
+  return (
+    <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+      <Tex tex={tex} color={color || C.phosphor} size={size} />
+      {subTex && <div style={{ marginTop: 4 }}><Tex tex={subTex} color={C.muted} size={13} /></div>}
+      {extra}
+    </div>
+  );
+}
 function ErrorBox({ message }) {
   if (!message) return null;
   return (
@@ -892,8 +970,8 @@ function ComplexModule() {
               <span style={{ color: C.danger, fontFamily: MONO }}>⚠ {resultErr}</span>
             ) : (
               <>
-                <div style={{ fontFamily: MONO, fontSize: 20, color: C.phosphor }}>{formatComplex(result)}</div>
-                <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(result)}</div>
+                <Tex tex={texComplex(result)} color={C.phosphor} size={20} />
+                <div style={{ marginTop: 4 }}><Tex tex={texPolar(result)} color={C.muted} size={13} /></div>
               </>
             )}
           </div>
@@ -1110,7 +1188,7 @@ function CircuitExprModule() {
     ...items.map((it, i) => ({
       label: `Z${i + 1}`,
       value: complexFromPair(inputMode, it.re, it.im) || math.complex(0, 0),
-      color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length],
+      color: circuitColor(i),
     })),
     ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor, dash: '6,4', glow: true }] : []),
   ];
@@ -1133,14 +1211,14 @@ function CircuitExprModule() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {items.map((it, i) => (
             <div key={it.id} className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: circuitColor(i), width: 26 }}>
                 Z{i + 1}
               </span>
               <ComplexPairField
                 mode={inputMode}
                 aVal={it.re} bVal={it.im}
                 onA={(v) => updateItem(it.id, 're', v)} onB={(v) => updateItem(it.id, 'im', v)}
-                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix=" Ω"
+                color={circuitColor(i)} width={78} unitSuffix=" Ω"
               />
               <button
                 onClick={() => removeImpedance(it.id)}
@@ -1198,11 +1276,11 @@ function CircuitExprModule() {
             <ErrorBox message={exprError} />
           ) : equivalent ? (
             <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
-              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
-              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              <Tex tex={withUnit(texComplex(equivalent), 'Ω')} color={C.phosphor} size={22} />
+              <div style={{ marginTop: 4 }}><Tex tex={withUnit(texPolar(equivalent), 'Ω')} color={C.muted} size={13} /></div>
               {admittance && (
-                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
-                  Yeq = {formatComplex(admittance, 6)} S · {polarString(admittance)} S
+                <div style={{ marginTop: 10 }}>
+                  <Tex tex={`Y_{eq}=${withUnit(texComplex(admittance, 6), 'S')}\\;\\cdot\\;${withUnit(texPolar(admittance), 'S')}`} color={C.sky} size={13} />
                 </div>
               )}
               <div style={{ fontFamily: MONO, fontSize: 11, color: math.abs(equivalent) !== 0 && equivalent.im >= 0 ? C.amber : C.sky, marginTop: 8 }}>
@@ -1274,7 +1352,7 @@ function CircuitModule() {
   const argandPoints = [
     ...items.map((it, i) => {
       const z = complexFromPair(inputMode, it.re, it.im) || math.complex(0, 0);
-      return { label: `Z${i + 1}`, value: z, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length] };
+      return { label: `Z${i + 1}`, value: z, color: circuitColor(i) };
     }),
     ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor }] : []),
   ];
@@ -1303,14 +1381,14 @@ function CircuitModule() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {items.map((it, i) => (
             <div key={it.id} className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: circuitColor(i), width: 26 }}>
                 Z{i + 1}
               </span>
               <ComplexPairField
                 mode={inputMode}
                 aVal={it.re} bVal={it.im}
                 onA={(v) => updateItem(it.id, 're', v)} onB={(v) => updateItem(it.id, 'im', v)}
-                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix=" Ω"
+                color={circuitColor(i)} width={78} unitSuffix=" Ω"
               />
               <button
                 onClick={() => removeImpedance(it.id)}
@@ -1342,11 +1420,11 @@ function CircuitModule() {
             <ErrorBox message={eqError} />
           ) : (
             <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
-              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
-              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              <Tex tex={withUnit(texComplex(equivalent), 'Ω')} color={C.phosphor} size={22} />
+              <div style={{ marginTop: 4 }}><Tex tex={withUnit(texPolar(equivalent), 'Ω')} color={C.muted} size={13} /></div>
               {admittance && (
-                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
-                  Yeq = {formatComplex(admittance)} S &nbsp;·&nbsp; {polarString(admittance)} S
+                <div style={{ marginTop: 10 }}>
+                  <Tex tex={`Y_{eq}=${withUnit(texComplex(admittance, 6), 'S')}\\;\\cdot\\;${withUnit(texPolar(admittance), 'S')}`} color={C.sky} size={13} />
                 </div>
               )}
             </div>
@@ -1418,7 +1496,7 @@ function ComponentsModule() {
   const admittance = (equivalent && math.abs(equivalent) !== 0) ? math.divide(math.complex(1, 0), equivalent) : null;
 
   const argandPoints = [
-    ...trace.map((row, i) => ({ label: row.label, value: row.z, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length] })),
+    ...trace.map((row, i) => ({ label: row.label, value: row.z, color: circuitColor(i) })),
     ...(equivalent ? [{ label: 'Zeq', value: equivalent, color: C.phosphor }] : []),
   ];
 
@@ -1458,7 +1536,7 @@ function ComponentsModule() {
                 </div>
               )}
               <div className="qz-item-row" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 26 }}>
+                <span style={{ fontFamily: MONO, fontSize: 12, color: circuitColor(i), width: 26 }}>
                   {it.kind}{i + 1}
                 </span>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -1468,7 +1546,7 @@ function ComponentsModule() {
                 </div>
                 <TextField
                   value={it.value} onChange={(v) => updateValue(it.id, v)}
-                  placeholder={unitFor(it.kind)} color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78}
+                  placeholder={unitFor(it.kind)} color={circuitColor(i)} width={78}
                 />
                 <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{unitFor(it.kind)}</span>
                 <button
@@ -1521,13 +1599,15 @@ function ComponentsModule() {
                   borderLeft: `3px solid ${row.mode === null ? C.muted : (row.mode === 'serie' ? C.amber : C.sky)}`,
                   paddingLeft: 10,
                 }}>
-                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>
-                    {row.label} = {row.rawValue || '0'} {unitFor(row.kind)}
-                    {row.kind === 'L' ? ' → jωL' : row.kind === 'C' ? ' → −j/(ωC)' : ' (resistivo puro)'}
-                    &nbsp;⇒&nbsp; {formatComplex(row.z)} Ω
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                    <span>{row.label} = {row.rawValue || '0'} {unitFor(row.kind)}</span>
+                    <Tex color={C.muted} size={11.5}
+                      tex={row.kind === 'L' ? '\\rightarrow j\\omega L' : row.kind === 'C' ? '\\rightarrow -\\dfrac{j}{\\omega C}' : '\\text{(resistivo puro)}'} />
+                    <span>⇒</span>
+                    <Tex tex={withUnit(texComplex(row.z), 'Ω')} color={C.muted} size={11.5} />
                   </div>
                   <div style={{ fontFamily: MONO, fontSize: 13, color: row.id === (final && final.id) ? C.phosphor : C.text }}>
-                    {row.expr} = {formatComplex(row.value)} Ω
+                    {row.expr} = <Tex tex={withUnit(texComplex(row.value), 'Ω')} color={row.id === (final && final.id) ? C.phosphor : C.text} size={13} />
                   </div>
                 </div>
               ))}
@@ -1536,11 +1616,11 @@ function ComponentsModule() {
 
           {!traceError && equivalent && (
             <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
-              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(equivalent)} Ω</div>
-              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(equivalent)} Ω</div>
+              <Tex tex={withUnit(texComplex(equivalent), 'Ω')} color={C.phosphor} size={22} />
+              <div style={{ marginTop: 4 }}><Tex tex={withUnit(texPolar(equivalent), 'Ω')} color={C.muted} size={13} /></div>
               {admittance && (
-                <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
-                  Yeq = {formatComplex(admittance)} S &nbsp;·&nbsp; {polarString(admittance)} S
+                <div style={{ marginTop: 10 }}>
+                  <Tex tex={`Y_{eq}=${withUnit(texComplex(admittance, 6), 'S')}\\;\\cdot\\;${withUnit(texPolar(admittance), 'S')}`} color={C.sky} size={13} />
                 </div>
               )}
             </div>
@@ -1617,7 +1697,7 @@ function PhasorModule() {
     .join('');
 
   const chainPoints = phasors.map((p, i) => ({
-    label: signedLabel(i), value: signedValues[i], color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length],
+    label: signedLabel(i), value: signedValues[i], color: circuitColor(i),
   }));
   const argandPoints = [
     ...chainPoints,
@@ -1665,19 +1745,19 @@ function PhasorModule() {
                 title="alternar polaridad en la suma"
                 style={{
                   width: 26, height: 26, borderRadius: 3,
-                  border: `1px solid ${CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]}`, background: 'transparent',
-                  color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], fontFamily: MONO, fontSize: 13,
+                  border: `1px solid ${circuitColor(i)}`, background: 'transparent',
+                  color: circuitColor(i), fontFamily: MONO, fontSize: 13,
                   cursor: 'pointer', lineHeight: 1,
                 }}
               >{p.sign}</button>
-              <span style={{ fontFamily: MONO, fontSize: 12, color: CIRCUIT_COLORS[i % CIRCUIT_COLORS.length], width: 30 }}>
+              <span style={{ fontFamily: MONO, fontSize: 12, color: circuitColor(i), width: 30 }}>
                 {prefix}{i + 1}
               </span>
               <ComplexPairField
                 mode={inputMode}
                 aVal={p.re} bVal={p.im}
                 onA={(v) => updateField(p.id, 're', v)} onB={(v) => updateField(p.id, 'im', v)}
-                color={CIRCUIT_COLORS[i % CIRCUIT_COLORS.length]} width={78} unitSuffix={` ${unit}`}
+                color={circuitColor(i)} width={78} unitSuffix={` ${unit}`}
               />
               <button
                 onClick={() => removePhasor(p.id)}
@@ -1725,10 +1805,11 @@ function PhasorModule() {
               {prefix}total = {exprText}
             </div>
             <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
-              <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(resultant)} {unit}</div>
-              <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(resultant)} {unit}</div>
-              <div style={{ fontFamily: MONO, fontSize: 12, color: C.sky, marginTop: 10 }}>
-                {convention === 'rms' ? 'valor pico equivalente' : 'valor eficaz (RMS) equivalente'}: {round(altMag, 4)} {unit}
+              <Tex tex={withUnit(texComplex(resultant), unit)} color={C.phosphor} size={22} />
+              <div style={{ marginTop: 4 }}><Tex tex={withUnit(texPolar(resultant), unit)} color={C.muted} size={13} /></div>
+              <div style={{ marginTop: 10, fontFamily: MONO, fontSize: 12, color: C.sky }}>
+                {convention === 'rms' ? 'valor pico equivalente' : 'valor eficaz (RMS) equivalente'}:{' '}
+                <Tex tex={withUnit(texNum(altMag), unit)} color={C.sky} size={13} />
               </div>
             </div>
           </>
@@ -1785,16 +1866,16 @@ function SizeStepper({ label, value, onChange }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
       <span style={{ fontFamily: SANS, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
-      <button onClick={() => onChange(Math.max(1, value - 1))} style={stepperBtnStyle}>−</button>
+      <button onClick={() => onChange(Math.max(1, value - 1))} style={stepperBtnStyle()}>−</button>
       <span style={{ fontFamily: MONO, fontSize: 14, color: C.text, width: 18, textAlign: 'center' }}>{value}</span>
-      <button onClick={() => onChange(Math.min(9, value + 1))} style={stepperBtnStyle}>+</button>
+      <button onClick={() => onChange(Math.min(9, value + 1))} style={stepperBtnStyle()}>+</button>
     </div>
   );
 }
-const stepperBtnStyle = {
-  width: 22, height: 22, borderRadius: 3, border: `1px solid ${C.border}`,
-  background: 'transparent', color: C.text, fontFamily: MONO, cursor: 'pointer', lineHeight: 1,
-};
+function stepperBtnStyle() {
+  return { width: 22, height: 22, borderRadius: 3, border: `1px solid ${C.border}`,
+    background: 'transparent', color: C.text, fontFamily: MONO, cursor: 'pointer', lineHeight: 1 };
+}
 
 function MatrixResultView({ result, error }) {
   if (error) return <ErrorBox message={error} />;
@@ -1802,8 +1883,8 @@ function MatrixResultView({ result, error }) {
   if (result.kind === 'scalar') {
     return (
       <div>
-        <div style={{ fontFamily: MONO, fontSize: 22, color: C.phosphor }}>{formatComplex(result.value)}</div>
-        <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 4 }}>{polarString(result.value)}</div>
+        <Tex tex={texComplex(result.value)} color={C.phosphor} size={22} />
+        <div style={{ marginTop: 4 }}><Tex tex={texPolar(result.value)} color={C.muted} size={13} /></div>
       </div>
     );
   }
@@ -1815,9 +1896,9 @@ function MatrixResultView({ result, error }) {
           row.map((c, j) => (
             <div key={`${i}-${j}`} style={{
               background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 3,
-              padding: '4px 6px', fontFamily: MONO, fontSize: 12, color: C.phosphor, textAlign: 'center',
+              padding: '4px 6px', fontSize: 12, textAlign: 'center',
             }}>
-              {formatComplex(c)}
+              <Tex tex={texComplex(c)} color={C.phosphor} size={12} />
             </div>
           ))
         )}
@@ -2043,8 +2124,8 @@ function SystemSolverModule() {
             {result.x.map((val, i) => (
               <div key={i} style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '10px 14px' }}>
                 <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginBottom: 4 }}>{labels.out}{i + 1}</div>
-                <div style={{ fontFamily: MONO, fontSize: 18, color: C.phosphor }}>{formatComplex(val)} {labels.unitOut}</div>
-                <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, marginTop: 2 }}>{polarString(val)} {labels.unitOut}</div>
+                <Tex tex={withUnit(texComplex(val), labels.unitOut)} color={C.phosphor} size={18} />
+                <div style={{ marginTop: 2 }}><Tex tex={withUnit(texPolar(val), labels.unitOut)} color={C.muted} size={12.5} /></div>
               </div>
             ))}
             <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>
@@ -2078,13 +2159,35 @@ function MatrixModule() {
 }
 
 /* ============================== APP ROOT ============================== */
+/* Botón de tema, compartido por ambas consolas. */
+function ThemeToggle({ theme, onChange }) {
+  const isDark = theme === 'dark';
+  return (
+    <button onClick={() => onChange(isDark ? 'light' : 'dark')}
+      title={isDark ? 'Cambiar a modo día' : 'Cambiar a modo noche'}
+      style={{ fontFamily: MONO, fontSize: 12, padding: '7px 12px', borderRadius: 4,
+        border: `1px solid ${C.borderLit}`, background: 'transparent', color: C.text,
+        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap' }}>
+      <span style={{ fontSize: 13, color: C.phosphor }}>{isDark ? '☀' : '☾'}</span>
+      {isDark ? 'MODO DÍA' : 'MODO NOCHE'}
+    </button>
+  );
+}
+
 function App() {
   const [mode, setMode] = useState('complex');
+  const [theme, setTheme] = useState('dark');
+  C = THEMES[theme];                       // se aplica antes de que rendericen los hijos
+  useEffect(() => {
+    document.documentElement.style.background = C.bg;
+    document.body.style.background = C.bg;
+  }, [theme]);
   return (
     <div className="qz-root" style={{ background: C.bg, minHeight: '100%', padding: 24, fontFamily: SANS, color: C.text }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
         input::placeholder { color: ${C.muted}; }
+        .katex { color: inherit; }
 
         /* ===================================================================
            Diseño responsivo: horizontal en escritorio (comportamiento original
@@ -2122,11 +2225,14 @@ function App() {
         }
       `}</style>
 
-      <div style={{ marginBottom: 20 }}>
-        <div className="qz-tag" style={{ fontFamily: MONO, fontSize: 11, letterSpacing: '0.2em', color: C.phosphor, textTransform: 'uppercase' }}>
-          ◈ instrumento de cálculo
+      <div className="qz-head" style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+        <div>
+          <div className="qz-tag" style={{ fontFamily: MONO, fontSize: 11, letterSpacing: '0.2em', color: C.phosphor, textTransform: 'uppercase' }}>
+            ◈ instrumento de cálculo
+          </div>
+          <h1 className="qz-h1" style={{ fontFamily: SANS, fontWeight: 700, fontSize: 28, margin: '4px 0 2px' }}>Consola Z</h1>
         </div>
-        <h1 className="qz-h1" style={{ fontFamily: SANS, fontWeight: 700, fontSize: 28, margin: '4px 0 2px' }}>Consola Z</h1>
+        <ThemeToggle theme={theme} onChange={setTheme} />
       </div>
 
       <div className="qz-tabs" style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: `1px solid ${C.border}`, paddingBottom: 16, flexWrap: 'wrap' }}>
