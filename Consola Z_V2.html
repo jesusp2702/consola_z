@@ -60,6 +60,15 @@ let C = THEMES.dark;
 const MONO = "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace";
 const SANS = "'Space Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif";
 
+/* #rgb o #rrggbb -> rgba(...) con alfa dado, usado para el glow de foco de los campos. */
+function hexToRgba(hex, alpha = 1) {
+  if (!hex) return `rgba(110,255,192,${alpha})`;
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 /* ============================== COMPLEX HELPERS ============================== */
 function parseComplex(input) {
   if (input === undefined || input === null) return math.complex(0, 0);
@@ -158,6 +167,8 @@ function texLabel(name) {
     .replace(/·/g, '\\cdot ')
     .replace(/Ra/g, 'R_{a}').replace(/Xs/g, 'X_{s}');
 }
+/* símbolo de operación de la UI -> comando LaTeX, para la ecuación estilo libro de texto */
+const OP_TEX = { '+': '+', '−': '-', '×': '\\times', '÷': '\\div' };
 function computeBinary(a, b, op) {
   if (op === '+') return math.add(a, b);
   if (op === '−') return math.subtract(a, b);
@@ -816,25 +827,34 @@ function Label({ children }) {
     </div>
   );
 }
-function TextField({ value, onChange, placeholder, color, width = 96 }) {
+/* variant 'boxed' (por defecto): campo autónomo con su propio borde y fondo, para uso suelto
+   en cualquier módulo. variant 'bare': sin borde/fondo propio, pensado para vivir dentro de
+   un contenedor que ya aporta esa cápsula visual (ver ComplexPairField). */
+function TextField({ value, onChange, placeholder, color, width = 96, variant = 'boxed' }) {
+  const [focused, setFocused] = React.useState(false);
+  const accent = color || C.phosphor;
+  const bare = variant === 'bare';
   return (
     <input
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       placeholder={placeholder}
       style={{
         width,
-        background: C.bg,
-        border: `1px solid ${C.border}`,
-        borderRadius: 4,
+        boxSizing: 'border-box',
+        background: bare ? 'transparent' : C.bg,
+        border: bare ? 'none' : `1px solid ${focused ? accent : C.border}`,
+        borderRadius: bare ? 0 : 8,
         color: color || C.text,
         fontFamily: MONO,
         fontSize: 14,
-        padding: '6px 8px',
+        padding: bare ? '4px 2px' : '8px 10px',
         outline: 'none',
+        boxShadow: !bare && focused ? `0 0 0 3px ${hexToRgba(accent, 0.16)}` : 'none',
+        transition: 'border-color 160ms ease, box-shadow 160ms ease, background 160ms ease',
       }}
-      onFocus={(e) => (e.target.style.borderColor = C.phosphor)}
-      onBlur={(e) => (e.target.style.borderColor = C.border)}
     />
   );
 }
@@ -848,14 +868,16 @@ function Btn({ children, onClick, active, accent }) {
         fontFamily: MONO,
         fontSize: 13,
         padding: '8px 14px',
-        borderRadius: 4,
+        borderRadius: 7,
         border: `1px solid ${active ? (accent || C.phosphor) : C.border}`,
         background: bg,
         color: fg,
         cursor: 'pointer',
-        transition: 'all 120ms ease',
+        transition: 'all 140ms ease',
         whiteSpace: 'nowrap',
       }}
+      onMouseEnter={(e) => { if (!active) e.currentTarget.style.borderColor = accent || C.borderLit; }}
+      onMouseLeave={(e) => { if (!active) e.currentTarget.style.borderColor = C.border; }}
     >
       {children}
     </button>
@@ -897,12 +919,31 @@ function ModeToggle({ mode, onChange }) {
     </div>
   );
 }
+/* Agrupa el par (R,X) o (r,theta) en una sola cápsula: una barra de acento a la izquierda con
+   el `color` recibido (misma identidad visual que ya usaban las etiquetas Z1, A, B, ...) y un
+   glow compartido cuando cualquiera de los dos campos internos recibe foco. */
 function ComplexPairField({ mode, aVal, bVal, onA, onB, color, width = 78, unitSuffix = '' }) {
+  const [focused, setFocused] = React.useState(false);
+  const accent = color || C.phosphor;
   return (
-    <div className="qz-field-pair" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-      <TextField value={aVal} onChange={onA} placeholder={mode === 'polar' ? 'r' : 'R'} color={color} width={width} />
+    <div
+      className="qz-field-pair"
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{
+        display: 'flex', gap: 8, alignItems: 'center',
+        background: C.panel2,
+        border: `1px solid ${focused ? accent : C.border}`,
+        borderLeft: `3px solid ${accent}`,
+        borderRadius: 9,
+        padding: '7px 12px',
+        boxShadow: focused ? `0 0 0 3px ${hexToRgba(accent, 0.14)}` : 'none',
+        transition: 'border-color 160ms ease, box-shadow 160ms ease',
+      }}
+    >
+      <TextField value={aVal} onChange={onA} placeholder={mode === 'polar' ? 'r' : 'R'} color={color} width={width} variant="bare" />
       <span style={{ color: C.muted, fontFamily: MONO }}>{mode === 'polar' ? '∠' : '+'}</span>
-      <TextField value={bVal} onChange={onB} placeholder={mode === 'polar' ? 'θ' : 'X'} color={color} width={width} />
+      <TextField value={bVal} onChange={onB} placeholder={mode === 'polar' ? 'θ' : 'X'} color={color} width={width} variant="bare" />
       <span style={{ color: C.muted, fontFamily: MONO }}>{mode === 'polar' ? '°' : 'j'}{unitSuffix}</span>
     </div>
   );
@@ -964,14 +1005,17 @@ function ComplexModule() {
             ))}
           </div>
 
-          <Label>Resultado A {op} B</Label>
-          <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 4, padding: '12px 14px' }}>
+          <Label>Resultado — notación de libro de texto</Label>
+          <div style={{ background: C.bg, border: `1px solid ${C.borderLit}`, borderRadius: 8, padding: '18px 16px' }}>
             {resultErr ? (
               <span style={{ color: C.danger, fontFamily: MONO }}>⚠ {resultErr}</span>
             ) : (
               <>
-                <Tex tex={texComplex(result)} color={C.phosphor} size={20} />
-                <div style={{ marginTop: 4 }}><Tex tex={texPolar(result)} color={C.muted} size={13} /></div>
+                <Tex
+                  tex={`${texComplex(A)} \\ ${OP_TEX[op]} \\ ${texComplex(B)} \\ = \\ ${texComplex(result)}`}
+                  color={C.phosphor} size={21} display
+                />
+                <div style={{ marginTop: 10 }}><Tex tex={texPolar(result)} color={C.muted} size={13} /></div>
               </>
             )}
           </div>
